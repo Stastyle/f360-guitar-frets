@@ -1,0 +1,12 @@
+{
+	"autodeskProduct":	"Fusion360",
+	"type":	"addin",
+	"id":	"9a11cbef-1c27-4ceb-aadf-a49fc30d4561",
+	"author":	"GuitarFrets",
+	"description":	{
+		"":	"Create guitar fret slot sketches from scale length and fret count, and select them all for Press Pull"
+	},
+	"version":	"1.0",
+	"runOnStartup":	false,
+	"supportedOS":	"windows|mac"
+}
