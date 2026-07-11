@@ -338,3 +338,35 @@ from the assembly joint when present); hole cutting normal to faces; Floyd Rose 
 presets; acoustic saddle preset; bass hardware presets (after a dedicated verification
 round); string-through ferrule patterns; DXF/PDF template export; string-tree marker;
 tangent post offset; two-step vintage bores; θ>0 multi-scale; lefty full mirror.
+
+
+---
+
+# Tuner v1 implementation notes (2026-07-11, shipped)
+
+Deviations and refinements vs the spec above, decided during the reviewed
+implementation (see CHANGELOG 1.1):
+
+- Straight-pull per-string station OVERRIDE TABLE: supported in the math
+  (fret_math.tuner_straight_pull_posts(station_overrides=...), tested) but
+  NOT yet exposed in the dialog - deferred to keep the v1 UI tractable.
+  Presets + first/spacing cover the common cases; wire a TableCommandInput
+  to it when needed.
+- Pattern grids got a "row slant per station" parameter instead of a
+  separate Fender-inline preset: 0 = parallel rows (Gibson 3+3), 7.14 mm
+  per 23.3 mm station = the Fender 17-degree inline row. Custom per-post
+  x/y grids remain deferred.
+- Pattern stations are measured from the datum ALONG THE WOOD SURFACE
+  (flat until the break line, then along the face) so printed-template
+  numbers transfer 1:1; straight-pull stations are PLAN distances.
+- The tuner datum is FRET 0 (each string's own nut intersection), never the
+  nut slot edge - toggling the nut slot cannot move holes.
+- nut->post guide lines are drawn on flat headstocks only (pattern mode);
+  tilted-plane guides deferred. The side-pull readout covers tilted builds.
+- break_offset is not auto-synced to the nut slot width; the info box warns
+  when the face would start tilting inside the nut seat.
+- face_drop/break_offset are read and persisted whenever the tuner feature
+  is on (even at angle 0), so raising the angle in a later edit keeps the
+  dialog values instead of silently running with zeros.
+- The angled-plane probe uses the PROJECTED neck heading (center lines may
+  run up to 15 deg out of the fretboard plane); probe tolerance 1e-3 cm.

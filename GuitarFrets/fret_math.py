@@ -191,14 +191,13 @@ def _x_on_segment_line(segment, y):
     return x2 + (x1 - x2) * t
 
 
-def string_layout(fret_zero_segment, bridge_segment, string_count,
-                  spread_nut, spread_bridge, head_length):
-    """Per string, its (head_end, bridge_end) points in the local frame.
+def string_nut_geometry(fret_zero_segment, bridge_segment, string_count,
+                        spread_nut, spread_bridge):
+    """Per string: (nut_point, headward_unit, bridge_point) in the local frame.
 
     String 0 is the +y (bass side) outer string. Strings are spaced with equal
     center-to-center distances; spreads are outer-string center to center.
-    The head end continues the string direction past the nut by head_length,
-    for aligning tuners.
+    headward_unit points from the bridge toward (and past) the nut.
     """
     strings = []
     for i in range(string_count):
@@ -211,11 +210,310 @@ def string_layout(fret_zero_segment, bridge_segment, string_count,
 
         nut_pt = (_x_on_segment_line(fret_zero_segment, y_nut), y_nut)
         bridge_pt = (_x_on_segment_line(bridge_segment, y_bridge), y_bridge)
-
         ux, uy = normalize(nut_pt[0] - bridge_pt[0], nut_pt[1] - bridge_pt[1])
-        head_pt = (nut_pt[0] + ux * head_length, nut_pt[1] + uy * head_length)
+        strings.append((nut_pt, (ux, uy), bridge_pt))
+    return strings
+
+
+def string_layout(fret_zero_segment, bridge_segment, string_count,
+                  spread_nut, spread_bridge, head_length):
+    """Per string, its (head_end, bridge_end) points in the local frame.
+
+    String 0 is the +y (bass side) outer string. Strings are spaced with equal
+    center-to-center distances; spreads are outer-string center to center.
+    The head end continues the string direction past the nut by head_length
+    (a single value, or one value per string), for aligning tuners.
+    """
+    geometry = string_nut_geometry(fret_zero_segment, bridge_segment,
+                                   string_count, spread_nut, spread_bridge)
+    try:
+        lengths = list(head_length)
+    except TypeError:
+        lengths = [head_length] * string_count
+    if len(lengths) != string_count:
+        raise ValueError('Need one head length per string')
+
+    strings = []
+    for (nut_pt, (ux, uy), bridge_pt), length in zip(geometry, lengths):
+        head_pt = (nut_pt[0] + ux * length, nut_pt[1] + uy * length)
         strings.append((head_pt, bridge_pt))
     return strings
+
+
+# --- tuner layout ------------------------------------------------------------
+#
+# Terminology (see HARDWARE_RESEARCH.md, final v1 spec):
+#   station — along-neck (plan-view) distance of a post behind its string's
+#             own nut point; always positive, headstock-ward.
+#   side    — which headstock row holds the post's button: +1 bass (+y row),
+#             -1 treble. For straight-pull the post sits ON the string line;
+#             side only matters for guide/readout purposes and split bookkeeping.
+#   The nut datum is each string's own nut-line intersection (fret 0 for
+#   single-scale), NOT the nut slot edge — toggling the nut slot never moves
+#   tuner holes.
+
+
+def tuner_assign_stations(string_count, bass_count, reversed_=False):
+    """Per-string (station_index, side) for straight-pull layouts.
+
+    Station indices 0..N-1 are GLOBAL and distinct — naive symmetric per-side
+    sequences physically overlap the inner posts, because string plan lines
+    converge past the nut. Assignment alternates sides outer-to-inner starting
+    with the bass row (E, e, A, B, D, G for 3+3), so per side the outer string
+    gets the nearest post. Inline (bass_count 0 or N) is the monotonic
+    outer-to-outer special case. reversed_ mirrors the whole headstock:
+    sides flip and the nearest post moves to the opposite outer string.
+    """
+    if not 0 <= bass_count <= string_count:
+        raise ValueError('Bass-side count must be between 0 and the string count')
+    if reversed_:
+        # A reversed headstock is the mirror image: string i takes the role of
+        # string N-1-i and every side flips (this also mirrors an asymmetric
+        # split — reversed 4+2 is 2+4). Same bass_count here: the swap falls
+        # out of the index mirror + side negation.
+        mirrored = tuner_assign_stations(string_count, bass_count)
+        return [(k, -side) for k, side in reversed(mirrored)]
+
+    bass = list(range(bass_count))                        # outer-to-inner
+    treble = list(range(string_count - 1, bass_count - 1, -1))
+    order = []
+    for pair in zip(bass, treble):
+        order.extend(pair)
+    longer = bass[len(treble):] if len(bass) > len(treble) else treble[len(bass):]
+    order.extend(longer)
+
+    assignment = [None] * string_count
+    for station_index, string_index in enumerate(order):
+        side = 1 if string_index < bass_count else -1
+        assignment[string_index] = (station_index, side)
+    return assignment
+
+
+def tuner_straight_pull_posts(nut_geometry, bass_count, first, spacing,
+                              reversed_=False, station_overrides=None):
+    """Straight-pull post plan positions: one per string, ON its extended line.
+
+    nut_geometry comes from string_nut_geometry. Station k (from
+    tuner_assign_stations) sits first + k*spacing along the neck behind the
+    string's own nut point; station_overrides (per-string distances, None
+    entries keep the sequence value) feeds the manual table. Returns a list of
+    (post_point, station, side) per string; post_point is in the local frame.
+    Raises ValueError when a string runs (nearly) across the neck.
+    """
+    count = len(nut_geometry)
+    assignment = tuner_assign_stations(count, bass_count, reversed_)
+    posts = []
+    for i, (nut_pt, (ux, uy), _bridge) in enumerate(nut_geometry):
+        station_index, side = assignment[i]
+        station = first + station_index * spacing
+        if station_overrides is not None and station_overrides[i] is not None:
+            station = station_overrides[i]
+        if station <= 0:
+            raise ValueError('Tuner stations must be positive')
+        if ux >= -1e-9:
+            raise ValueError('String direction does not head past the nut')
+        t = station / -ux           # along-neck depth -> distance along string
+        post = (nut_pt[0] + ux * t, nut_pt[1] + uy * t)
+        posts.append((post, station, side))
+    return posts
+
+
+def tuner_pattern_posts(string_count, bass_count, first, pitch, row_offset,
+                        reversed_=False, row_slant=0.0):
+    """Pattern (grid-first) posts: fixed rows relative to the center line.
+
+    The bass row starts at +row_offset, the treble row at -row_offset; per
+    side, posts sit at first + k*pitch behind the datum, outer string nearest
+    (the classic Gibson 3+3 when pitch = 35 mm and row_slant = 0). row_slant
+    steps each row toward the center line per station — 0.281" per 0.919"
+    axial step reproduces Fender's 17-degree inline row. Inline splits put
+    the single row on the occupied side. Grid x values are datum-relative
+    plan stations for a flat headstock, or FACE-true distances when drawn on
+    an angled face — the caller decides (grids are dimensioned on the face,
+    per the spec). reversed_ mirrors the grid and the string assignment about
+    the center line (a geometric no-op for symmetric splits, but the
+    assignment flips). Returns a list of (post_point, station, side) per
+    string, where post_point = (-station, row_y).
+    """
+    if reversed_:
+        # Mirror image, same as tuner_assign_stations: index mirror + side
+        # negation (same bass_count — the split swap falls out of it).
+        mirrored = tuner_pattern_posts(string_count, bass_count,
+                                       first, pitch, row_offset,
+                                       row_slant=row_slant)
+        return [((post[0], -post[1]), station, -side)
+                for post, station, side in reversed(mirrored)]
+
+    if not 0 <= bass_count <= string_count:
+        raise ValueError('Bass-side count must be between 0 and the string count')
+    if first <= 0 or pitch <= 0:
+        raise ValueError('Pattern first distance and pitch must be positive')
+
+    posts = []
+    for i in range(string_count):
+        if i < bass_count:
+            rank, side = i, 1                             # bass row, outer first
+        else:
+            rank, side = string_count - 1 - i, -1         # treble row, outer first
+        station = first + rank * pitch
+        row_y = (row_offset - rank * row_slant) * side
+        posts.append(((-station, row_y), station, side))
+    return posts
+
+
+def plan_to_face_distance(plan_behind_datum, break_offset, angle):
+    """Along-face distance from the hinge line for a plan station.
+
+    The headstock face tilts by `angle` (radians) about a hinge line
+    break_offset behind the datum: plan = break_offset + face*cos(angle).
+    Distances before the hinge are still on the flat part — raise, the post
+    belongs on the face.
+    """
+    if plan_behind_datum < break_offset - 1e-9:
+        raise ValueError('Post lands before the headstock break line')
+    return (plan_behind_datum - break_offset) / math.cos(angle)
+
+
+def face_to_plan_distance(face_from_hinge, break_offset, angle):
+    """Inverse of plan_to_face_distance (face distances measured from the
+    hinge line along the tilted face)."""
+    if face_from_hinge < 0:
+        raise ValueError('Face distances are measured headstock-ward from the hinge')
+    return break_offset + face_from_hinge * math.cos(angle)
+
+
+def side_pull_angles(nut_geometry, posts):
+    """Per string, the PLAN-view angle (degrees) between the string direction
+    and the nut->post line — how far the nut slot must flare toward its post.
+    0 for straight-pull posts. The true 3D pull (side + break angle) is
+    larger; treat these as the plan component only.
+    """
+    angles = []
+    for (nut_pt, (ux, uy), _bridge), (post, _station, _side) in zip(nut_geometry, posts):
+        vx, vy = post[0] - nut_pt[0], post[1] - nut_pt[1]
+        length = math.hypot(vx, vy)
+        if length < 1e-12:
+            raise ValueError('Post coincides with the nut point')
+        cross = ux * vy - uy * vx
+        dot = ux * vx + uy * vy
+        angles.append(math.degrees(math.atan2(abs(cross), dot)))
+    return angles
+
+
+def post_clearance_violations(points, min_distance):
+    """Pairs of posts closer (center-to-center) than min_distance.
+
+    Pass FACE coordinates for angled headstocks — plan distances understate
+    true spacing. Returns [(i, j, distance), ...], nearest pair first.
+    """
+    violations = []
+    for i in range(len(points)):
+        for j in range(i + 1, len(points)):
+            d = math.hypot(points[j][0] - points[i][0],
+                           points[j][1] - points[i][1])
+            if d < min_distance:
+                violations.append((i, j, d))
+    return sorted(violations, key=lambda v: v[2])
+
+
+def tuner_reference(layout, string_count, spread_nut, spread_bridge,
+                    mode, bass_count, reversed_, hole_diameter,
+                    clearance_margin, angle, break_offset,
+                    first=None, spacing=None,
+                    pattern_first=None, pattern_pitch=None,
+                    pattern_row_offset=None, pattern_row_slant=0.0,
+                    head_margin=0.8):
+    """Complete tuner-post reference geometry for one layout.
+
+    layout comes from slot_layout. mode is 'straight' or 'pattern'; angle is
+    the headstock tilt in radians (0 = flat). Straight-pull distances (first,
+    spacing) are PLAN values along the neck behind each string's own nut
+    point; pattern distances (pattern_first, pattern_pitch) are measured from
+    the datum along the WOOD SURFACE — flat until the break line, then along
+    the tilted face — so a printed template matches them 1:1.
+
+    Returns a dict:
+      'plan_posts'  — per-string (x, y) in the plan local frame (x negative)
+      'draw_posts'  — where circles go: plan coordinates at angle 0, else
+                      FACE coordinates (f, y), f headstock-ward from the hinge
+      'stations'    — per-string spec distance (see above per mode)
+      'sides'       — +1 bass row / -1 treble row
+      'head_lengths'— per-string string-line extension reaching its post
+      'side_angles' — plan-view nut->post side-pull angle per string, degrees
+      'violations'  — post pairs closer than hole diameter + clearance margin
+      'nut_points'  — per-string nut point in the plan local frame
+      'tilted'      — whether an angled headstock plane is in play
+    Raises ValueError on degenerate geometry.
+    """
+    geometry = string_nut_geometry(layout['fret_zero'], layout['bridge'],
+                                   string_count, spread_nut, spread_bridge)
+    tilted = angle > 1e-9
+    if not tilted:
+        break_offset = 0.0
+
+    if mode == 'straight':
+        posts = tuner_straight_pull_posts(geometry, bass_count, first,
+                                          spacing, reversed_)
+        plan_posts = [post for post, _station, _side in posts]
+        stations = [station for _post, station, _side in posts]
+        sides = [side for _post, _station, side in posts]
+        if tilted:
+            draw_posts = [(plan_to_face_distance(station, break_offset, angle),
+                           post[1])
+                          for post, station, _side in posts]
+        else:
+            draw_posts = list(plan_posts)
+    else:
+        posts = tuner_pattern_posts(string_count, bass_count, pattern_first,
+                                    pattern_pitch, pattern_row_offset,
+                                    reversed_, pattern_row_slant)
+        stations = [station for _post, station, _side in posts]
+        sides = [side for _post, _station, side in posts]
+        if tilted:
+            draw_posts = []
+            plan_posts = []
+            for post, station, _side in posts:
+                face = station - break_offset
+                if face <= 0:
+                    raise ValueError('Post lands before the headstock break line')
+                draw_posts.append((face, post[1]))
+                plan_posts.append(
+                    (-face_to_plan_distance(face, break_offset, angle),
+                     post[1]))
+        else:
+            plan_posts = [post for post, _station, _side in posts]
+            draw_posts = list(plan_posts)
+
+    plan_tuples = list(zip(plan_posts, stations, sides))
+    return {
+        'plan_posts': plan_posts,
+        'draw_posts': draw_posts,
+        'stations': stations,
+        'sides': sides,
+        'head_lengths': head_lengths_to_posts(geometry, plan_tuples,
+                                              margin=head_margin),
+        'side_angles': side_pull_angles(geometry, plan_tuples),
+        'violations': post_clearance_violations(
+            draw_posts, hole_diameter + (clearance_margin or 0.0)),
+        'nut_points': [nut_pt for nut_pt, _direction, _bridge in geometry],
+        'tilted': tilted,
+    }
+
+
+def head_lengths_to_posts(nut_geometry, posts, margin=0.0):
+    """Per-string head-extension length so each string line reaches its post's
+    along-neck station (plus margin). For straight-pull the extension ends on
+    the post itself; for pattern grids it ends level with the post.
+    """
+    lengths = []
+    for (nut_pt, (ux, uy), _bridge), (post, _station, _side) in zip(nut_geometry, posts):
+        if ux >= -1e-9:
+            raise ValueError('String direction does not head past the nut')
+        depth = nut_pt[0] - post[0]   # along-neck drop from nut to post
+        if depth <= 0:
+            raise ValueError('Post is not behind the nut')
+        lengths.append(depth / -ux + margin)
+    return lengths
 
 
 def taper_outline(fret_zero_segment, bridge_segment, last_fret_segment,

@@ -163,6 +163,303 @@ def test_string_layout_single_string_on_center():
     assert math.isclose(bridge[1], 0.0, abs_tol=1e-12)
 
 
+# --- tuners -----------------------------------------------------------------
+
+def _nut_geometry(spread_nut=3.5, spread_bridge=5.25, count=6):
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    return fret_math.string_nut_geometry(layout['fret_zero'], layout['bridge'],
+                                         count, spread_nut, spread_bridge)
+
+
+def test_assign_inline_monotonic_and_reversed():
+    normal = fret_math.tuner_assign_stations(6, 6)
+    assert [k for k, _ in normal] == [0, 1, 2, 3, 4, 5]
+    assert all(side == 1 for _, side in normal)
+    # Reversed inline (Hendrix Strat): posts on the treble row, low E farthest.
+    rev = fret_math.tuner_assign_stations(6, 6, reversed_=True)
+    assert [k for k, _ in rev] == [5, 4, 3, 2, 1, 0]
+    assert all(side == -1 for _, side in rev)
+
+
+def test_assign_3_3_interleaves_globally():
+    # Spec order E, e, A, B, D, G — six DISTINCT stations, outer strings nearest.
+    assignment = fret_math.tuner_assign_stations(6, 3)
+    assert [k for k, _ in assignment] == [0, 2, 4, 5, 3, 1]
+    assert [side for _, side in assignment] == [1, 1, 1, -1, -1, -1]
+    assert sorted(k for k, _ in assignment) == list(range(6))
+
+
+def test_assign_3_3_reversed_starts_treble():
+    assignment = fret_math.tuner_assign_stations(6, 3, reversed_=True)
+    # Mirror: e nearest on the treble row, then E, B, A, G, D.
+    assert [k for k, _ in assignment] == [1, 3, 5, 4, 2, 0]
+    assert [side for _, side in assignment] == [1, 1, 1, -1, -1, -1]
+
+
+def test_assign_4_2_reversed_mirrors_split():
+    rev = fret_math.tuner_assign_stations(6, 4, reversed_=True)
+    # Reversed 4+2 becomes 2+4: two bass-row posts, four treble-row posts.
+    assert sum(1 for _, side in rev if side == 1) == 2
+    assert sum(1 for _, side in rev if side == -1) == 4
+    assert rev[5][0] == 0    # high e nearest
+
+
+def test_straight_pull_posts_on_string_lines():
+    geometry = _nut_geometry()
+    posts = fret_math.tuner_straight_pull_posts(geometry, 6, 4.19, 2.33)
+    for (nut_pt, (ux, uy), _b), (post, station, _side) in zip(geometry, posts):
+        # Post is behind the nut by exactly its station, along the neck.
+        assert math.isclose(nut_pt[0] - post[0], station, abs_tol=1e-9)
+        # And it lies on the string's extended line.
+        t = (post[0] - nut_pt[0]) / ux
+        assert math.isclose(nut_pt[1] + uy * t, post[1], abs_tol=1e-9)
+        assert t > 0
+    # Inline: strictly increasing stations from bass outer to treble outer.
+    stations = [s for _, s, _ in posts]
+    assert stations == sorted(stations)
+    assert math.isclose(stations[0], 4.19, abs_tol=1e-12)
+
+
+def test_straight_pull_override_table():
+    geometry = _nut_geometry()
+    overrides = [None, 7.0, None, None, None, None]
+    posts = fret_math.tuner_straight_pull_posts(geometry, 6, 4.19, 2.33,
+                                                station_overrides=overrides)
+    assert math.isclose(posts[1][1], 7.0, abs_tol=1e-12)
+    assert math.isclose(posts[0][1], 4.19, abs_tol=1e-12)
+
+
+def test_straight_pull_3_3_no_symmetric_collision():
+    # The reviewed failure mode: naive symmetric per-side stations put the two
+    # inner posts ~7 mm apart. The global sequence must keep ALL posts at
+    # least a hole diameter apart for the default spacing.
+    geometry = _nut_geometry()
+    posts = fret_math.tuner_straight_pull_posts(geometry, 3, 4.19, 2.33)
+    points = [p for p, _, _ in posts]
+    assert fret_math.post_clearance_violations(points, 1.0) == []
+
+
+def test_pattern_3_3_gibson_grid():
+    posts = fret_math.tuner_pattern_posts(6, 3, 3.8, 3.5, 1.2)
+    # Bass row at +1.2, treble row at -1.2, outer strings nearest.
+    assert [side for _, _, side in posts] == [1, 1, 1, -1, -1, -1]
+    assert all(math.isclose(abs(p[1]), 1.2, abs_tol=1e-12) for p, _, _ in posts)
+    assert math.isclose(posts[0][1], 3.8, abs_tol=1e-12)      # E nearest
+    assert math.isclose(posts[2][1], 3.8 + 2 * 3.5, abs_tol=1e-12)  # D farthest
+    assert math.isclose(posts[5][1], 3.8, abs_tol=1e-12)      # e nearest
+    # Reversed on a symmetric grid is a FULL no-op (geometry and assignment):
+    # each string still reaches the nearest hole on its own side.
+    rev = fret_math.tuner_pattern_posts(6, 3, 3.8, 3.5, 1.2, reversed_=True)
+    assert rev == posts
+
+
+def test_pattern_inline_reversed_flips_row():
+    posts = fret_math.tuner_pattern_posts(6, 6, 4.19, 2.33, 1.0, reversed_=True)
+    assert all(side == -1 for _, _, side in posts)
+    assert math.isclose(posts[0][1], 4.19 + 5 * 2.33, abs_tol=1e-12)  # E farthest
+
+
+def test_plan_face_mapping_with_break_offset():
+    # Spec-mandated case: theta = 17 deg, break offset 25 mm (2.5 cm).
+    theta = math.radians(17.0)
+    plan = 4.19
+    face = fret_math.plan_to_face_distance(plan, 2.5, theta)
+    assert math.isclose(face, (4.19 - 2.5) / math.cos(theta), rel_tol=1e-12)
+    assert face > plan - 2.5   # face distances are longer past the hinge
+    # Round trip.
+    assert math.isclose(fret_math.face_to_plan_distance(face, 2.5, theta),
+                        plan, rel_tol=1e-12)
+    # Naive mapping (no hinge) would be wrong by ~1.1 mm here.
+    naive = plan / math.cos(theta)
+    assert abs((naive - 2.5 / math.cos(theta) + 2.5) - plan) > 0.05
+    # Before the hinge is an error.
+    try:
+        fret_math.plan_to_face_distance(1.0, 2.5, theta)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('post before the break line must raise')
+
+
+def test_side_pull_angles_zero_for_straight_pull():
+    geometry = _nut_geometry()
+    posts = fret_math.tuner_straight_pull_posts(geometry, 6, 4.19, 2.33)
+    for angle in fret_math.side_pull_angles(geometry, posts):
+        assert abs(angle) < 1e-9
+
+
+def test_side_pull_angles_nonzero_for_pattern():
+    geometry = _nut_geometry()
+    posts = fret_math.tuner_pattern_posts(6, 3, 3.8, 3.5, 1.2)
+    angles = fret_math.side_pull_angles(geometry, posts)
+    assert all(a >= 0 for a in angles)
+    assert max(angles) > 3.0   # inner strings kink visibly on a 3+3 grid
+
+
+def test_post_clearance_detects_close_pair():
+    violations = fret_math.post_clearance_violations(
+        [(0.0, 0.0), (0.5, 0.0), (5.0, 5.0)], 1.0)
+    assert violations == [(0, 1, 0.5)]
+
+
+def test_head_lengths_reach_posts():
+    geometry = _nut_geometry()
+    posts = fret_math.tuner_pattern_posts(6, 3, 3.8, 3.5, 1.2)
+    lengths = fret_math.head_lengths_to_posts(geometry, posts, margin=0.5)
+    strings = fret_math.string_layout(
+        *_string_layout_args(), head_length=lengths)
+    for (head, _bridge), (post, _s, _side) in zip(strings, posts):
+        # Head end reaches at least the post's along-neck station.
+        assert head[0] <= post[0] + 1e-9
+
+
+def _string_layout_args():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    return (layout['fret_zero'], layout['bridge'], 6, 3.5, 5.25)
+
+
+def test_string_layout_accepts_per_string_lengths():
+    args = _string_layout_args()
+    strings = fret_math.string_layout(*args, head_length=[1, 2, 3, 4, 5, 6])
+    geometry = fret_math.string_nut_geometry(*args)
+    for (head, _bridge), (nut_pt, _dir, _b), expected in zip(
+            strings, geometry, [1, 2, 3, 4, 5, 6]):
+        d = math.hypot(head[0] - nut_pt[0], head[1] - nut_pt[1])
+        assert math.isclose(d, expected, abs_tol=1e-9)
+    try:
+        fret_math.string_layout(*args, head_length=[1, 2])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('length-count mismatch must raise')
+
+
+def test_tuner_reference_straight_flat():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'straight', 6, False,
+        hole_diameter=1.0, clearance_margin=0.8, angle=0.0, break_offset=0.0,
+        first=4.19, spacing=2.33)
+    assert not ref['tilted']
+    assert ref['draw_posts'] == ref['plan_posts']
+    assert ref['violations'] == []
+    assert all(abs(a) < 1e-9 for a in ref['side_angles'])
+    # Head extensions reach past each post (0.8 margin).
+    for length, station in zip(ref['head_lengths'], ref['stations']):
+        assert length > station
+
+
+def test_tuner_reference_tilted_pattern_surface_distances():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    theta = math.radians(17.0)
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'pattern', 3, False,
+        hole_diameter=1.0, clearance_margin=0.0, angle=theta, break_offset=0.35,
+        pattern_first=4.0, pattern_pitch=3.5, pattern_row_offset=1.2)
+    assert ref['tilted']
+    # Face distance = surface station minus the flat run to the break line.
+    f0, y0 = ref['draw_posts'][0]
+    assert math.isclose(f0, 4.0 - 0.35, abs_tol=1e-12)
+    assert math.isclose(abs(y0), 1.2, abs_tol=1e-12)
+    # Plan projection is foreshortened past the hinge.
+    x0, _ = ref['plan_posts'][0]
+    assert math.isclose(-x0, 0.35 + (4.0 - 0.35) * math.cos(theta), abs_tol=1e-12)
+    assert -x0 < 4.0
+    # A post before the break line raises.
+    try:
+        fret_math.tuner_reference(
+            layout, 6, 3.5, 5.25, 'pattern', 3, False,
+            hole_diameter=1.0, clearance_margin=0.0, angle=theta,
+            break_offset=4.5, pattern_first=4.0, pattern_pitch=3.5,
+            pattern_row_offset=1.2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('post before the break line must raise')
+
+
+def test_tuner_reference_straight_tilted():
+    # Spec A.3 case: straight pull on a 17 deg headstock, hinge 3.5 mm back.
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    theta = math.radians(17.0)
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'straight', 6, False,
+        hole_diameter=1.0, clearance_margin=0.8, angle=theta, break_offset=0.35,
+        first=4.19, spacing=2.33)
+    assert ref['tilted']
+    for (f, y_face), (x_plan, y_plan), station in zip(
+            ref['draw_posts'], ref['plan_posts'], ref['stations']):
+        # Longitudinal: station is PLAN; face distance stretches past the hinge.
+        assert math.isclose(f, (station - 0.35) / math.cos(theta), rel_tol=1e-12)
+        # Lateral is unchanged by the tilt.
+        assert math.isclose(y_face, y_plan, abs_tol=1e-12)
+    # A first post before the hinge raises.
+    try:
+        fret_math.tuner_reference(
+            layout, 6, 3.5, 5.25, 'straight', 6, False,
+            hole_diameter=1.0, clearance_margin=0.8, angle=theta,
+            break_offset=4.5, first=4.19, spacing=2.33)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('first post before the break line must raise')
+
+
+def test_tuner_reference_straight_multiscale_per_string_datum():
+    # Fanned layout: each station is measured behind that string's OWN nut
+    # point ("multi-scale safe by construction").
+    layout = fret_math.slot_layout(68.58, 64.77, 22, 7, 3.0, 0.06)
+    geometry = fret_math.string_nut_geometry(layout['fret_zero'],
+                                             layout['bridge'], 6, 3.5, 5.25)
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'straight', 6, False,
+        hole_diameter=1.0, clearance_margin=0.8, angle=0.0, break_offset=0.0,
+        first=4.19, spacing=2.33)
+    for (nut_pt, _u, _b), (x_post, _y), station in zip(
+            geometry, ref['plan_posts'], ref['stations']):
+        assert math.isclose(nut_pt[0] - x_post, station, abs_tol=1e-9)
+
+
+def test_tuner_reference_reversed_stays_per_string_aligned():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'straight', 6, True,
+        hole_diameter=1.0, clearance_margin=0.8, angle=0.0, break_offset=0.0,
+        first=4.19, spacing=2.33)
+    # Reversed inline: low E (string 0) farthest, on the treble row.
+    assert math.isclose(ref['stations'][0], 4.19 + 5 * 2.33, abs_tol=1e-12)
+    assert ref['sides'][0] == -1
+    assert math.isclose(ref['stations'][5], 4.19, abs_tol=1e-12)
+    # Outputs stay index-aligned per string: string 0's head extension is the
+    # longest (its post is farthest), and every post is on its own line.
+    assert ref['head_lengths'][0] == max(ref['head_lengths'])
+    assert all(abs(a) < 1e-9 for a in ref['side_angles'])
+
+
+def test_pattern_row_slant_fender_inline():
+    # Fender-style slanted inline row: 0.281" lateral per 0.919" axial.
+    axial, lateral = 2.33, 0.714
+    posts = fret_math.tuner_pattern_posts(6, 6, 4.19, axial, 0.7,
+                                          row_slant=lateral)
+    ys = [post[1] for post, _s, _side in posts]
+    for k in range(6):
+        assert math.isclose(ys[k], 0.7 - k * lateral, abs_tol=1e-12)
+    # The row marches toward (and across) the treble side at ~17 degrees.
+    angle = math.degrees(math.atan2(lateral, axial))
+    assert 16.5 < angle < 17.5
+
+
+def test_tuner_reference_flags_collisions():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    # Naive-tight spacing on a 3+3 straight pull: inner strings converge, so
+    # a tiny global spacing must trip the clearance check.
+    ref = fret_math.tuner_reference(
+        layout, 6, 3.5, 5.25, 'straight', 3, False,
+        hole_diameter=1.0, clearance_margin=0.8, angle=0.0, break_offset=0.0,
+        first=4.19, spacing=0.2)
+    assert ref['violations']
+
+
 # --- taper ------------------------------------------------------------------
 
 def test_taper_outline_straight_case():

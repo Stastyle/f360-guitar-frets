@@ -109,7 +109,62 @@ over the board. API assumptions to check if it misbehaves:
 - All of it runs inside preview too; on any failure the created planes and
   sketches are deleted and a `FretSlotsError` explains what to try.
 
-## 8. Misc
+## 8. Tuner layout internals (added with v1.1)
+
+- Pure math lives in `fret_math.tuner_reference` (pytest-covered): station
+  interleaving for splits, reversed-headstock mirroring, plan↔face mapping
+  with the hinge (`plan = break_offset + face·cos θ`), clearance checks,
+  per-string head extensions. The command only adapts params and draws.
+- **Tilted plane chain** (θ > 0, `_apply_tuner_plane`): offset construction
+  plane `setByOffset(native_top, −face_drop)` → hinge sketch on it → hinge
+  line (perpendicular to the center line at `break_offset` behind the datum)
+  → angled plane `setByAngle(hinge_line, θ, reference)` → tuner sketch on
+  that plane. Neither the offset sign nor the angle sign is trusted: each
+  candidate plane gets a probe sketch, and a known 3D point (the dropped
+  hinge center / a point 2 cm down the face) must map to sketch z ≈ 0, else
+  the other sign — and for setByAngle also the other reference planarEntity
+  (`native_top`, then the offset plane) — is tried; all-fail raises
+  `FretSlotsError` instead of drawing a flipped reference. Pre-flight:
+
+  ```python
+  import adsk.core, adsk.fusion, math
+  app = adsk.core.Application.get()
+  d = adsk.fusion.Design.cast(app.activeProduct)
+  root = d.rootComponent
+  planes = root.constructionPlanes
+  pi = planes.createInput()
+  pi.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByReal(-0.6))
+  off = planes.add(pi)
+  sk = root.sketches.add(off)
+  ln = sk.sketchCurves.sketchLines.addByTwoPoints(
+      adsk.core.Point3D.create(0, -3, 0), adsk.core.Point3D.create(0, 3, 0))
+  pi = planes.createInput()
+  pi.setByAngle(ln, adsk.core.ValueInput.createByReal(math.radians(17)),
+                root.xYConstructionPlane)
+  ang = planes.add(pi)   # must succeed with the axis line OFF the reference plane
+  print(ang.geometry.normal.asArray())
+  ```
+
+- The face frame inside the tuner sketch is measured, not assumed: the
+  origin/axes come from mapping three root-space probe points
+  (hinge center, a point 2 cm down the face, a LATERAL point **dropped onto
+  the hinge plane** — projecting a top-plane lateral point would smear
+  `face_drop·sin θ` into the longitudinal axis).
+- The angle input uses `'deg'` units (`addValueInput(..., 'deg', ...)`);
+  `.value` returns radians. `_read_values.read_nonnegative` accepts 0 —
+  the standard `read_length` rejects it. Prefill for zero-valid fields
+  (angle, break offset, face drop, row offset, clearance) bypasses
+  `set_value`'s `> 0` guard, like `nut_slot_offset`.
+- Metadata is **version 6**: tuner params plus four tracked tokens
+  (`tuners_token`, `tuner_angled_plane_token`, `tuner_hinge_token`,
+  `tuner_offset_plane_token`), deleted in that (consumed-last) order by
+  `_delete_tracked` — so toggling the feature off on edit removes the whole
+  chain. v5 sketches load fine (missing keys default to feature-off).
+- With tuners on, the String Layout head extensions are computed per string
+  to reach each post (plan station × cos θ mapping included); the manual
+  `headstock_length` input/settings slot is never overwritten.
+
+## 9. Misc
 
 - `Sketch.isLightBulbOn = True` re-shows a sketch that a feature consumed
   (plain `isVisible` is read-only).

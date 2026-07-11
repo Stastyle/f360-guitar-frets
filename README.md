@@ -91,6 +91,42 @@ to the last fret plus the **board end** overhang. Tick **Cut board to
 outline** to also trim the board body to that shape right away (an Intersect
 extrude through the whole blank — requires the top face selection).
 
+#### Tuner layout
+
+Tick **Tuner layout** (in the **Hardware** group) to get a **Tuner Layout**
+reference sketch: a hole circle and a center point per post (no cutting —
+that stays yours). Two independent controls shape it:
+
+- **Placement** — *Straight pull*: each post sits **on its own string's
+  extended line**; enter the first post's distance from the nut and the
+  spacing between stations (plan-view values along the neck; defaults are
+  Fender's documented 1.650" / 0.919"). With a split (3+3, 4+2) the stations
+  interleave between the rows (E, e, A, B, D, G for 3+3) so the converging
+  inner strings never collide — an automatic clearance check warns if posts
+  get closer than hole diameter + margin. *Pattern (two rows)*: fixed rows
+  parallel to the center line (the classic Gibson 3+3 — 35 mm pitch, outer
+  strings nearest), with nut→post guide lines and a side-pull angle readout,
+  since the strings angle toward the posts.
+- **Bass-side posts** — the split: 6 = inline, 3 = 3+3, 4 = 4+2 (bass: 4+0,
+  2+2). **Reversed headstock** mirrors it (a reversed inline puts the low E
+  farthest, like a reversed Strat).
+
+**Headstock angle** is the key option for tilted headstocks (PRS 10°,
+14°, Gibson 17°): with an angle set, the posts are drawn on a **tilted
+construction plane** in *true face distances* — exactly like a stick-on
+template — hinged at the **break line** behind the nut and dropped **face
+drop** below the fretboard top. Drill perpendicular to that face. At 0° the
+posts are drawn on the fretboard plane (correct for flat Fender-style
+headstocks; note plan-view distances understate on-face distances by
+1/cos(angle) on tilted builds — that is why the plane exists). Tilted mode
+needs a single-scale layout and the flat top FACE selected.
+
+With tuners on, the string-line head extensions automatically reach each
+string's own post (the manual **headstock line length** is preserved for
+when the feature is off). Hole diameter presets: 10 mm (modern sealed),
+11/32" (vintage Kluson), or custom. The dimensional research behind the
+defaults is in [HARDWARE_RESEARCH.md](HARDWARE_RESEARCH.md).
+
 #### Multi-scale (fanned frets)
 
 Tick **Multi-scale** and enter the **bass side scale**, **treble side scale**,
@@ -153,13 +189,13 @@ versions of the add-in load their values but not their selections.
 
 ## Roadmap
 
-The goal is a full guitar-design plugin. The next two features — **tuner
-layout** (straight-pull and pattern placement, flat or tilted-back headstocks)
-and **bridge hardware** (per-string compensated saddle points plus mounting
-footprint presets) — are fully researched and specified in
-[HARDWARE_RESEARCH.md](HARDWARE_RESEARCH.md): multi-source lutherie research
-with independently fact-checked dimensions, the design analysis, and the
-reviewed v1 spec both features will be built from.
+The goal is a full guitar-design plugin. **Tuner layout v1** (above) shipped
+from the researched spec in [HARDWARE_RESEARCH.md](HARDWARE_RESEARCH.md);
+still deferred from it: a per-string station override table in the dialog,
+nut→post guides on tilted headstocks, tilted multi-scale, hole cutting, and
+bass hardware presets (pending a verification round). Next up is **bridge
+hardware** v1 — per-string compensated saddle points and mounting footprint
+presets at the bridge mark — also fully specified there.
 
 ## Notes and limits
 

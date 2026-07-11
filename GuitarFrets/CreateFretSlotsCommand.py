@@ -47,11 +47,35 @@ DEFAULTS = {
     'radius_mode': 'No radius',
     'radius_start_expr': '9.5 in',
     'radius_end_expr': '16 in',
+    'place_tuners': False,
+    'tuner_mode': 'Straight pull',
+    'tuner_bass_count': 6,
+    'tuner_reversed': False,
+    'headstock_angle_expr': '0 deg',
+    'face_drop_expr': '6 mm',
+    'break_offset_expr': '3.5 mm',
+    'tuner_first_expr': '41.9 mm',
+    'tuner_spacing_expr': '23.3 mm',
+    'pattern_first_expr': '40 mm',
+    'pattern_pitch_expr': '35 mm',
+    'pattern_row_offset_expr': '12 mm',
+    'pattern_row_slant_expr': '0 mm',
+    'tuner_hole_preset': '10 mm (modern sealed)',
+    'tuner_hole_expr': '10 mm',
+    'tuner_clearance_expr': '8 mm',
     'buttons_promoted': False,
 }
 
 CREATE_NEW_LABEL = 'Create new sketch'
 RADIUS_MODES = ('No radius', 'Single radius', 'Compound radius')
+TUNER_MODES = ('Straight pull', 'Pattern (two rows)')
+# Peghead hole diameters in cm (Fusion internal units); see HARDWARE_RESEARCH.md.
+HOLE_PRESETS = (
+    ('10 mm (modern sealed)', 1.0),
+    ('11/32 in (vintage Kluson)', 0.873125),
+    ('Custom', None),
+)
+MAX_HEADSTOCK_ANGLE = math.radians(25.0)
 
 # sin(1 deg): the fret-zero reference may not be (nearly) parallel to the
 # center line, or fret 0 cannot be located on it.
@@ -88,6 +112,10 @@ def load_settings():
         pass
     if settings['radius_mode'] not in RADIUS_MODES:
         settings['radius_mode'] = DEFAULTS['radius_mode']
+    if settings['tuner_mode'] not in TUNER_MODES:
+        settings['tuner_mode'] = DEFAULTS['tuner_mode']
+    if settings['tuner_hole_preset'] not in [name for name, _ in HOLE_PRESETS]:
+        settings['tuner_hole_preset'] = DEFAULTS['tuner_hole_preset']
     return settings
 
 
@@ -261,16 +289,31 @@ def _read_values(inputs):
             values[target] = value
         return value
 
+    tuners_checkbox = inputs.itemById('place_tuners')
+    place_tuners_on = bool(tuners_checkbox.value) if tuners_checkbox else False
+
     for input_id, label in (
         ('slot_width', 'Fret slot width'),
         ('slot_length', 'Fret slot length'),
         ('string_spread_nut', 'String spread at nut'),
         ('string_spread_bridge', 'String spread at bridge'),
-        ('headstock_length', 'Headstock line length'),
         ('nut_width', 'Nut width'),
         ('board_overhang', 'Board end past last fret'),
     ):
         read_length(input_id, label, input_id)
+
+    if place_tuners_on:
+        # The manual head-line length is unused (and hidden) while the tuner
+        # feature computes per-string extensions — read it leniently so a
+        # stale value never blocks the build, but keep it for the metadata.
+        head_input = inputs.itemById('headstock_length')
+        values['headstock_length'] = (
+            head_input.value
+            if head_input and head_input.isValidExpression
+            and head_input.value > 0 else None)
+    else:
+        read_length('headstock_length', 'Headstock line length',
+                    'headstock_length')
 
     spinner = inputs.itemById('fret_count')
     values['fret_count'] = int(spinner.value) if spinner else DEFAULTS['fret_count']
@@ -338,6 +381,73 @@ def _read_values(inputs):
                           ('flip', 'flip_direction')):
         checkbox = inputs.itemById(input_id)
         values[key] = bool(checkbox.value) if checkbox else False
+
+    def read_nonnegative(input_id, label, maximum=None):
+        # Zero is a legitimate value here (unlike read_length).
+        value_input = inputs.itemById(input_id)
+        if not value_input or not value_input.isValidExpression:
+            problems[input_id] = '{}: enter a valid value (0 allowed).'.format(label)
+            return None
+        value = value_input.value
+        if value < 0:
+            problems[input_id] = '{}: must not be negative.'.format(label)
+            return None
+        if maximum is not None and value > maximum:
+            problems[input_id] = '{}: too large.'.format(label)
+            return None
+        return value
+
+    values['place_tuners'] = place_tuners_on
+    values['tuner_mode'] = None
+    values['headstock_angle'] = 0.0
+    if values['place_tuners']:
+        dropdown = inputs.itemById('tuner_mode')
+        mode_name = dropdown.selectedItem.name if dropdown and dropdown.selectedItem \
+            else TUNER_MODES[0]
+        values['tuner_mode'] = ('pattern' if mode_name == 'Pattern (two rows)'
+                                else 'straight')
+        spinner = inputs.itemById('tuner_bass_count')
+        values['tuner_bass_count'] = int(spinner.value) if spinner else 6
+        checkbox = inputs.itemById('tuner_reversed')
+        values['tuner_reversed'] = bool(checkbox.value) if checkbox else False
+
+        # The angle input uses degree units; .value is radians. 0 is valid.
+        angle = read_nonnegative('headstock_angle', 'Headstock angle',
+                                 maximum=MAX_HEADSTOCK_ANGLE * 1.001)
+        values['headstock_angle'] = angle if angle is not None else 0.0
+        # Read these even at angle 0, so the metadata keeps what the dialog
+        # shows — otherwise a later edit that raises the angle would silently
+        # run with face_drop/break_offset zeroed by the prefill.
+        values['face_drop'] = read_nonnegative('face_drop', 'Face drop') or 0.0
+        values['break_offset'] = read_nonnegative('break_offset',
+                                                  'Break line offset') or 0.0
+
+        if values['tuner_mode'] == 'straight':
+            values['tuner_first'] = read_length('tuner_first',
+                                                'First post distance')
+            values['tuner_spacing'] = read_length('tuner_spacing', 'Post spacing')
+        else:
+            values['pattern_first'] = read_length('pattern_first',
+                                                  'First post distance')
+            values['pattern_pitch'] = read_length('pattern_pitch', 'Post pitch')
+            values['pattern_row_offset'] = read_nonnegative(
+                'pattern_row_offset', 'Row offset from center')
+            values['pattern_row_slant'] = read_nonnegative(
+                'pattern_row_slant', 'Row slant per station')
+
+        hole_dropdown = inputs.itemById('tuner_hole_preset')
+        hole_name = (hole_dropdown.selectedItem.name
+                     if hole_dropdown and hole_dropdown.selectedItem
+                     else HOLE_PRESETS[0][0])
+        values['tuner_hole'] = None
+        for name, diameter in HOLE_PRESETS:
+            if name == hole_name and diameter is not None:
+                values['tuner_hole'] = diameter
+        if values['tuner_hole'] is None:
+            values['tuner_hole'] = read_length('tuner_hole_custom',
+                                               'Post hole diameter')
+        values['tuner_clearance'] = read_nonnegative('tuner_clearance',
+                                                     'Housing clearance margin')
 
     return values, list(problems.values())
 
@@ -423,6 +533,31 @@ def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
             return False, ('"Cut board to outline" requires selecting the '
                            'fretboard top FACE (not a construction plane).'), None
 
+    if values['place_tuners']:
+        if values['tuner_bass_count'] > values['string_count']:
+            return False, ('Bass-side tuner count must not exceed the number '
+                           'of strings.'), None
+        if values['multiscale'] and values['tuner_mode'] == 'pattern':
+            return False, ('Pattern tuner layouts need a single-scale layout — '
+                           'a fanned nut breaks the fixed-grid assumptions. '
+                           'Use Straight pull, or disable Multi-scale.'), None
+        if values['multiscale'] and values['headstock_angle'] > 1e-9:
+            return False, ('A tilted headstock plane is not supported for '
+                           'multi-scale layouts yet — set the headstock angle '
+                           'to 0 (the plan-view posts stay correct).'), None
+        if values['headstock_angle'] > 1e-9:
+            if top_entity and not adsk.fusion.BRepFace.cast(top_entity):
+                return False, ('A tilted headstock plane requires selecting '
+                               'the flat fretboard top FACE (not a '
+                               'construction plane).'), None
+            first = (values.get('tuner_first')
+                     if values['tuner_mode'] == 'straight'
+                     else values.get('pattern_first'))
+            if first is not None and first <= values['break_offset']:
+                return False, ('The first tuner post must sit beyond the '
+                               'headstock break line (increase the first post '
+                               'distance or reduce the break offset).'), None
+
     radius_span = half_span
     if values['radius_mode']:
         if top_entity and not adsk.fusion.BRepFace.cast(top_entity):
@@ -462,6 +597,23 @@ def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
     return True, _success_message(design.unitsManager, params), params
 
 
+def _tuner_layout_geometry(params, layout):
+    """Adapter: full tuner-post geometry via fret_math.tuner_reference (pure
+    python, unit-tested there). Raises ValueError on degenerate geometry —
+    reported as a FretSlotsError by the callers."""
+    return fret_math.tuner_reference(
+        layout, params.string_count, params.string_spread_nut,
+        params.string_spread_bridge, params.tuner_mode,
+        params.tuner_bass_count, params.tuner_reversed, params.tuner_hole,
+        params.tuner_clearance, params.headstock_angle, params.break_offset,
+        first=getattr(params, 'tuner_first', None),
+        spacing=getattr(params, 'tuner_spacing', None),
+        pattern_first=getattr(params, 'pattern_first', None),
+        pattern_pitch=getattr(params, 'pattern_pitch', None),
+        pattern_row_offset=getattr(params, 'pattern_row_offset', None),
+        pattern_row_slant=getattr(params, 'pattern_row_slant', 0.0) or 0.0)
+
+
 def _success_message(units_manager, params):
     units = units_manager.defaultLengthUnits
 
@@ -499,6 +651,45 @@ def _success_message(units_manager, params):
     elif params.nut_slot_offset:
         lines.append('Whole layout shifted {} from the fret-zero reference.'
                      .format(fmt(params.nut_slot_offset)))
+    if params.place_tuners:
+        try:
+            probe = fret_math.slot_layout(
+                params.bass_scale, params.treble_scale, params.fret_count,
+                params.perpendicular_fret, params.half_span, params.slot_width)
+            tuner_geo = _tuner_layout_geometry(params, probe)
+        except ValueError as error:
+            lines.append('Tuner layout problem: {}.'.format(error))
+        else:
+            geometry = fret_math.string_nut_geometry(
+                probe['fret_zero'], probe['bridge'], params.string_count,
+                params.string_spread_nut, params.string_spread_bridge)
+            farthest = max(nut_pt[0] - post[0] for (nut_pt, _u, _b), post in
+                           zip(geometry, tuner_geo['plan_posts']))
+            lines.append('Tuner posts: farthest {} behind the nut (plan view).'
+                         .format(fmt(farthest)))
+            if tuner_geo['tilted']:
+                lines.append('Posts are drawn on the tilted headstock plane in '
+                             'TRUE face distances — drill perpendicular to '
+                             'that face.')
+                if (params.nut_slot_width
+                        and params.break_offset < params.nut_slot_width):
+                    lines.append('WARNING: the headstock face starts tilting '
+                                 '{} behind fret 0, INSIDE the nut seat ({} '
+                                 'wide) — raise "Break line behind nut" to at '
+                                 'least the nut slot width.'
+                                 .format(fmt(params.break_offset),
+                                         fmt(params.nut_slot_width)))
+            worst = max(tuner_geo['side_angles'])
+            if worst > 0.5:
+                lines.append('Max side pull at the nut: {:.1f} deg (plan view; '
+                             'flare each nut slot toward its post — the true '
+                             '3D pull is slightly larger).'.format(worst))
+            for i, j, distance in tuner_geo['violations'][:2]:
+                lines.append('WARNING: posts of strings {} and {} are only {} '
+                             'apart — tuner housings will collide. Increase '
+                             'the spacing/pitch or change the split.'
+                             .format(i + 1, j + 1, fmt(distance)))
+
     slot_count = params.fret_count + (1 if params.nut_slot_width else 0)
     summary = '{} slots'.format(slot_count)
     if params.draw_strings:
@@ -662,6 +853,13 @@ def _delete_tracked(design, metadata):
         ('radius_feature_token', adsk.fusion.LoftFeature),
         ('radius_sketch_tokens', adsk.fusion.Sketch),
         ('radius_plane_tokens', adsk.fusion.ConstructionPlane),
+        # Tuner chain in consumed-last order: the sketch lives on the angled
+        # plane, whose hinge line lives in the hinge sketch, which may live
+        # on the offset plane.
+        ('tuners_token', adsk.fusion.Sketch),
+        ('tuner_angled_plane_token', adsk.fusion.ConstructionPlane),
+        ('tuner_hinge_token', adsk.fusion.Sketch),
+        ('tuner_offset_plane_token', adsk.fusion.ConstructionPlane),
         ('bridge_token', adsk.fusion.Sketch),
         ('strings_token', adsk.fusion.Sketch),
         ('taper_token', adsk.fusion.Sketch),
@@ -950,6 +1148,241 @@ def _draw_polyline_sketch(params, fret_zero, direction, name, point_pairs,
     return sketch
 
 
+def _draw_tuner_plan_sketch(params, fret_zero, direction, tuner_geo):
+    """Flat-headstock (angle 0) tuner sketch on the fretboard-top entity:
+    a hole circle + center point per post, and nut->post guide lines for
+    pattern grids (straight-pull guides would coincide with the string
+    extensions)."""
+    sketch, mapping = _create_sketch(params.top_entity)
+    try:
+        frame = _sketch_frame(mapping, fret_zero, direction)
+        sketch.isComputeDeferred = True
+        try:
+            circles = sketch.sketchCurves.sketchCircles
+            lines = sketch.sketchCurves.sketchLines
+            radius = params.tuner_hole / 2.0
+            for (x, y), nut_pt in zip(tuner_geo['plan_posts'],
+                                      tuner_geo['nut_points']):
+                center = _place_point((x, y), frame)
+                circles.addByCenterRadius(center, radius)
+                sketch.sketchPoints.add(center)
+                if params.tuner_mode == 'pattern':
+                    guide = lines.addByTwoPoints(_place_point(nut_pt, frame),
+                                                 center)
+                    guide.isConstruction = True
+        finally:
+            sketch.isComputeDeferred = False
+        sketch.name = 'Tuner Layout ({} posts)'.format(params.string_count)
+    except Exception:
+        try:
+            sketch.deleteMe()
+        except Exception:
+            pass
+        raise
+    return sketch
+
+
+def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
+                       tuner_geo):
+    """Tilted-headstock tuner geometry: offset plane face_drop below the top,
+    a hinge line break_offset behind the nut datum, an angled plane hinged on
+    it, and the tuner sketch drawn ON that plane in true face coordinates.
+
+    Every plane direction is verified with a probe point (mapped through the
+    candidate plane's sketch) instead of trusting offset/angle sign
+    conventions — on failure this raises FretSlotsError rather than drawing a
+    silently-flipped reference. Returns (tuner_sketch, angled_plane,
+    hinge_sketch, offset_plane); offset_plane is None when face_drop is 0.
+    """
+    top_face = adsk.fusion.BRepFace.cast(params.top_entity)
+    if not top_face:
+        raise FretSlotsError('A tilted headstock plane requires selecting the '
+                             'flat fretboard top FACE.')
+    context = top_face.assemblyContext
+    native_top = top_face.nativeObject if context else top_face
+    component = native_top.body.parentComponent
+    up = _top_outward_normal(top_face)
+    theta = params.headstock_angle
+    planes = component.constructionPlanes
+
+    created = []
+
+    def cleanup_and_raise(message):
+        for obj in reversed(created):
+            try:
+                obj.deleteMe()
+            except Exception:
+                pass
+        raise FretSlotsError(message)
+
+    def sketch_mapper(sketch):
+        if context:
+            try:
+                return sketch.createForAssemblyContext(context)
+            except Exception:
+                return sketch
+        return sketch
+
+    # Hinge center: on the center line, break_offset behind the (shifted)
+    # nut datum, dropped face_drop below the top. Root space throughout.
+    hinge_center = mapping_sketch.sketchToModelSpace(
+        _place_point((-params.break_offset, 0.0), frame))
+    drop = up.copy()
+    drop.scaleBy(-params.face_drop)
+    hinge_center.translateBy(drop)
+
+    # --- base for the hinge line: offset plane, or the top itself at drop 0.
+    offset_plane = None
+    hinge_sketch = None
+    hinge_map = None
+    if params.face_drop > 1e-9:
+        for sign in (-1.0, 1.0):
+            try:
+                plane_input = planes.createInput()
+                plane_input.setByOffset(
+                    native_top,
+                    adsk.core.ValueInput.createByReal(params.face_drop * sign))
+                candidate = planes.add(plane_input)
+            except Exception:
+                continue
+            probe_sketch = component.sketches.add(candidate)
+            probe_map = sketch_mapper(probe_sketch)
+            if abs(probe_map.modelToSketchSpace(hinge_center.copy()).z) < 1e-3:
+                offset_plane = candidate
+                hinge_sketch = probe_sketch
+                hinge_map = probe_map
+                created.extend([candidate, probe_sketch])
+                break
+            try:
+                probe_sketch.deleteMe()
+                candidate.deleteMe()
+            except Exception:
+                pass
+        if offset_plane is None:
+            cleanup_and_raise('Could not place the headstock face plane '
+                              'below the fretboard top — reselect the top '
+                              'face and try again.')
+    else:
+        hinge_sketch, hinge_map = _create_sketch(params.top_entity)
+        created.append(hinge_sketch)
+
+    try:
+        hinge_frame = _sketch_frame(hinge_map, fret_zero, direction)
+        hinge_line = hinge_sketch.sketchCurves.sketchLines.addByTwoPoints(
+            _place_point((-params.break_offset, -params.half_span), hinge_frame),
+            _place_point((-params.break_offset, params.half_span), hinge_frame))
+        hinge_line.isConstruction = True
+        hinge_sketch.name = 'Headstock Hinge'
+    except Exception:
+        cleanup_and_raise('Could not draw the headstock hinge line:\n{}'
+                          .format(traceback.format_exc().splitlines()[-1]))
+
+    # --- angled plane hinged on that line, verified against a probe point
+    # 2 cm down the face (headward and below the hinge by sin(theta)).
+    # The center line may legitimately run up to 15 deg out of the fretboard
+    # plane (validate_and_compute allows it; _sketch_frame projects it), so
+    # the probe must use the PROJECTED heading — the hinge line was built
+    # from the projected frame, and a raw out-of-plane direction would miss
+    # every candidate plane and abort the build.
+    heading = direction.copy()
+    tilt = up.copy()
+    tilt.scaleBy(direction.dotProduct(up))
+    heading.subtract(tilt)
+    if heading.length < 1e-9:
+        cleanup_and_raise('The center line is perpendicular to the fretboard '
+                          'top — cannot orient the headstock plane.')
+    heading.normalize()
+    face_probe = hinge_center.copy()
+    step = heading.copy()
+    step.scaleBy(-math.cos(theta) * 2.0)
+    face_probe.translateBy(step)
+    step = up.copy()
+    step.scaleBy(-math.sin(theta) * 2.0)
+    face_probe.translateBy(step)
+
+    angled_plane = None
+    tuner_sketch = None
+    tuner_map = None
+    reference_planes = ([native_top, offset_plane] if offset_plane
+                        else [native_top])
+    for reference in reference_planes:
+        for sign in (1.0, -1.0):
+            try:
+                plane_input = planes.createInput()
+                plane_input.setByAngle(
+                    hinge_line,
+                    adsk.core.ValueInput.createByReal(theta * sign),
+                    reference)
+                candidate = planes.add(plane_input)
+            except Exception:
+                continue
+            probe_sketch = component.sketches.add(candidate)
+            probe_map = sketch_mapper(probe_sketch)
+            if abs(probe_map.modelToSketchSpace(face_probe.copy()).z) < 1e-3:
+                angled_plane = candidate
+                tuner_sketch = probe_sketch
+                tuner_map = probe_map
+                created.extend([candidate, probe_sketch])
+                break
+            try:
+                probe_sketch.deleteMe()
+                candidate.deleteMe()
+            except Exception:
+                pass
+        if angled_plane:
+            break
+    if angled_plane is None:
+        cleanup_and_raise('Could not tilt the headstock plane about the hinge '
+                          'line — see DEV_NOTES.md (setByAngle assumptions) '
+                          'and check the top face selection.')
+
+    # --- face frame inside the tuner sketch: origin at the hinge center,
+    # x down the face (headward), y lateral toward the bass side. Both axes
+    # are measured from mapped probe points, not assumed.
+    try:
+        # The lateral probe must sit ON the hinge plane (drop it like the
+        # hinge center) — projecting a top-plane point onto the tilted face
+        # would smear face_drop*sin(theta) into the longitudinal axis.
+        lateral_probe = mapping_sketch.sketchToModelSpace(
+            _place_point((-params.break_offset, 1.0), frame))
+        lateral_probe.translateBy(drop)
+        origin2 = tuner_map.modelToSketchSpace(hinge_center.copy())
+        fx2 = tuner_map.modelToSketchSpace(face_probe.copy())
+        fy2 = tuner_map.modelToSketchSpace(lateral_probe)
+        ex = ((fx2.x - origin2.x) / 2.0, (fx2.y - origin2.y) / 2.0)
+        ey = (fy2.x - origin2.x, fy2.y - origin2.y)
+
+        def face_point(f, y):
+            return adsk.core.Point3D.create(
+                origin2.x + ex[0] * f + ey[0] * y,
+                origin2.y + ex[1] * f + ey[1] * y, 0.0)
+
+        tuner_sketch.isComputeDeferred = True
+        try:
+            circles = tuner_sketch.sketchCurves.sketchCircles
+            lines = tuner_sketch.sketchCurves.sketchLines
+            radius = params.tuner_hole / 2.0
+            for f, y in tuner_geo['draw_posts']:
+                center = face_point(f, y)
+                circles.addByCenterRadius(center, radius)
+                tuner_sketch.sketchPoints.add(center)
+            # Hinge reference line at f = 0, for orienting the template.
+            span = max(abs(y) for _f, y in tuner_geo['draw_posts']) + 2.0
+            hinge_mark = lines.addByTwoPoints(face_point(0.0, -span),
+                                              face_point(0.0, span))
+            hinge_mark.isConstruction = True
+        finally:
+            tuner_sketch.isComputeDeferred = False
+        tuner_sketch.name = 'Tuner Layout ({} posts, tilted)'.format(
+            params.string_count)
+    except Exception:
+        cleanup_and_raise('Could not draw the tuner posts on the headstock '
+                          'plane:\n{}'
+                          .format(traceback.format_exc().splitlines()[-1]))
+
+    return tuner_sketch, angled_plane, hinge_sketch, offset_plane
+
+
 def build_slots(params):
     """Create or rebuild the whole layout.
 
@@ -984,6 +1417,9 @@ def build_slots(params):
     radius_feature = None
     radius_sketches = []
     radius_planes = []
+    tuner_sketch = None
+    tuner_tooling = []   # hinge sketch (tilted headstock only)
+    tuner_planes = []    # [angled plane, offset plane] — cleanup order
     cut_feature = None
     nut_cut_feature = None
     taper_cut_feature = None
@@ -1048,17 +1484,45 @@ def build_slots(params):
                 [layout['bridge']], construction=True)
             extra_sketches.append(bridge_sketch)
 
+        # Tuner geometry first: with tuners on, the string-line head
+        # extensions reach each string's own post instead of the manual
+        # headstock length (which is preserved untouched for when the
+        # feature is off again).
+        tuner_geo = None
+        if params.place_tuners:
+            try:
+                tuner_geo = _tuner_layout_geometry(params, layout)
+            except ValueError as error:
+                raise FretSlotsError('Tuner layout: {}.'.format(error))
+
         strings_sketch = None
         if params.draw_strings:
+            head_lengths = (tuner_geo['head_lengths'] if tuner_geo
+                            else params.headstock_length)
             strings = fret_math.string_layout(
                 layout['fret_zero'], layout['bridge'], params.string_count,
                 params.string_spread_nut, params.string_spread_bridge,
-                params.headstock_length)
+                head_lengths)
             strings_sketch = _draw_polyline_sketch(
                 params, fret_zero, direction,
                 'String Layout ({} strings)'.format(params.string_count),
                 strings)
             extra_sketches.append(strings_sketch)
+
+        if tuner_geo:
+            if tuner_geo['tilted']:
+                (tuner_sketch, angled_plane, hinge_sketch,
+                 offset_plane) = _apply_tuner_plane(
+                    params, mapping_sketch, frame, direction, fret_zero,
+                    tuner_geo)
+                tuner_tooling.append(hinge_sketch)
+                tuner_planes.append(angled_plane)
+                if offset_plane:
+                    tuner_planes.append(offset_plane)
+            else:
+                tuner_sketch = _draw_tuner_plan_sketch(
+                    params, fret_zero, direction, tuner_geo)
+            extra_sketches.append(tuner_sketch)
 
         taper_sketch = None
         if params.draw_taper:
@@ -1115,9 +1579,11 @@ def build_slots(params):
         # bridge mark) stay visible. Sketches whose geometry now exists as
         # solid (cut slots / cut board) are hidden — but without a cut the
         # slot sketch stays visible, or there would be nothing to see.
-        for created_sketch in [sketch] + extra_sketches + radius_sketches:
+        for created_sketch in ([sketch] + extra_sketches + radius_sketches
+                               + tuner_tooling):
             _fix_all_curves(created_sketch)
-        to_hide = list(radius_sketches) + list(radius_planes)
+        to_hide = (list(radius_sketches) + list(radius_planes)
+                   + list(tuner_tooling) + list(tuner_planes))
         if cut_feature:
             to_hide.append(sketch)
         if taper_cut_feature and taper_sketch:
@@ -1128,8 +1594,33 @@ def build_slots(params):
             except Exception:
                 pass
 
+        tuner_metadata = {
+            'place_tuners': params.place_tuners,
+            'tuner_mode': getattr(params, 'tuner_mode', None),
+            'tuner_bass_count': getattr(params, 'tuner_bass_count', None),
+            'tuner_reversed': getattr(params, 'tuner_reversed', False),
+            'headstock_angle_rad': getattr(params, 'headstock_angle', 0.0),
+            'face_drop_cm': getattr(params, 'face_drop', None),
+            'break_offset_cm': getattr(params, 'break_offset', None),
+            'tuner_first_cm': getattr(params, 'tuner_first', None),
+            'tuner_spacing_cm': getattr(params, 'tuner_spacing', None),
+            'pattern_first_cm': getattr(params, 'pattern_first', None),
+            'pattern_pitch_cm': getattr(params, 'pattern_pitch', None),
+            'pattern_row_offset_cm': getattr(params, 'pattern_row_offset', None),
+            'pattern_row_slant_cm': getattr(params, 'pattern_row_slant', None),
+            'tuner_hole_cm': getattr(params, 'tuner_hole', None),
+            'tuner_clearance_cm': getattr(params, 'tuner_clearance', None),
+            'tuners_token': _entity_token(tuner_sketch) if tuner_sketch else '',
+            'tuner_hinge_token': (_entity_token(tuner_tooling[0])
+                                  if tuner_tooling else ''),
+            'tuner_angled_plane_token': (_entity_token(tuner_planes[0])
+                                         if tuner_planes else ''),
+            'tuner_offset_plane_token': (_entity_token(tuner_planes[1])
+                                         if len(tuner_planes) > 1 else ''),
+        }
         metadata = json.dumps({
-            'version': 5,
+            'version': 6,
+            **tuner_metadata,
             'scale_cm': (params.bass_scale + params.treble_scale) / 2.0,
             'bass_scale_cm': params.bass_scale,
             'treble_scale_cm': params.treble_scale,
@@ -1189,9 +1680,13 @@ def build_slots(params):
         # created, in feature-before-consumed-object order. An edited slot
         # sketch is the user's existing object — leave it for undo instead of
         # deleting it.
+        # Tuner chain in consumed-last order: the tuner sketch (already in
+        # extra_sketches) before the angled plane, then the hinge sketch,
+        # then the offset plane — mirroring _delete_tracked.
         cleanup = ([nut_cut_feature, cut_feature, taper_cut_feature,
                     radius_feature]
-                   + radius_sketches + radius_planes + extra_sketches)
+                   + radius_sketches + radius_planes + extra_sketches
+                   + tuner_planes[:1] + tuner_tooling + tuner_planes[1:])
         if created_new:
             cleanup.append(sketch)
         for obj in cleanup:
@@ -1316,6 +1811,56 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         set_value('board_overhang', 'board_overhang_cm')
         set_check('cut_taper', 'cut_taper')
 
+        def select_dropdown_item(input_id, name):
+            dropdown = inputs.itemById(input_id)
+            if not dropdown:
+                return
+            # Only select the target item — clearing first would leave the
+            # dropdown transiently empty and break get_inputs (see radius).
+            for i in range(dropdown.listItems.count):
+                item = dropdown.listItems.item(i)
+                if item.name == name:
+                    item.isSelected = True
+                    break
+
+        set_check('place_tuners', 'place_tuners')
+        select_dropdown_item('tuner_mode',
+                             'Pattern (two rows)'
+                             if metadata.get('tuner_mode') == 'pattern'
+                             else 'Straight pull')
+        set_spinner('tuner_bass_count', 'tuner_bass_count', 0, 12)
+        set_check('tuner_reversed', 'tuner_reversed')
+        # Zero (and for offsets, zero-adjacent) values are legitimate here, so
+        # these skip set_value's "> 0" guard — same pattern as nut_slot_offset.
+        for input_id, key in (('headstock_angle', 'headstock_angle_rad'),
+                              ('face_drop', 'face_drop_cm'),
+                              ('break_offset', 'break_offset_cm'),
+                              ('pattern_row_offset', 'pattern_row_offset_cm'),
+                              ('pattern_row_slant', 'pattern_row_slant_cm'),
+                              ('tuner_clearance', 'tuner_clearance_cm')):
+            command_input = inputs.itemById(input_id)
+            stored = metadata.get(key)
+            if command_input and isinstance(stored, (int, float)):
+                try:
+                    command_input.value = float(stored)
+                except Exception:
+                    pass
+        set_value('tuner_first', 'tuner_first_cm')
+        set_value('tuner_spacing', 'tuner_spacing_cm')
+        set_value('pattern_first', 'pattern_first_cm')
+        set_value('pattern_pitch', 'pattern_pitch_cm')
+        stored_hole = metadata.get('tuner_hole_cm')
+        if isinstance(stored_hole, (int, float)) and stored_hole > 0:
+            preset_name = 'Custom'
+            for name, diameter in HOLE_PRESETS:
+                if diameter is not None and abs(diameter - stored_hole) < 1e-6:
+                    preset_name = name
+                    break
+            select_dropdown_item('tuner_hole_preset', preset_name)
+            if preset_name == 'Custom':
+                set_value('tuner_hole_custom', 'tuner_hole_cm')
+        self._apply_tuner_visibility(inputs)
+
         mode = metadata.get('radius_mode')
         mode_name = ('Single radius' if mode == 'single'
                      else 'Compound radius' if mode == 'compound'
@@ -1370,6 +1915,41 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
                                   ('bass_scale', multiscale),
                                   ('treble_scale', multiscale),
                                   ('perpendicular_fret', multiscale)):
+            command_input = inputs.itemById(input_id)
+            if command_input:
+                command_input.isVisible = visible
+
+    @staticmethod
+    def _apply_tuner_visibility(inputs):
+        checkbox = inputs.itemById('place_tuners')
+        on = bool(checkbox.value) if checkbox else False
+        dropdown = inputs.itemById('tuner_mode')
+        mode = (dropdown.selectedItem.name if dropdown and dropdown.selectedItem
+                else TUNER_MODES[0])
+        straight = mode == TUNER_MODES[0]
+        hole_dropdown = inputs.itemById('tuner_hole_preset')
+        custom_hole = bool(hole_dropdown and hole_dropdown.selectedItem
+                           and hole_dropdown.selectedItem.name == 'Custom')
+        for input_id, visible in (
+            ('tuner_mode', on),
+            ('tuner_bass_count', on),
+            ('tuner_reversed', on),
+            ('headstock_angle', on),
+            ('break_offset', on),
+            ('face_drop', on),
+            ('tuner_first', on and straight),
+            ('tuner_spacing', on and straight),
+            ('pattern_first', on and not straight),
+            ('pattern_pitch', on and not straight),
+            ('pattern_row_offset', on and not straight),
+            ('pattern_row_slant', on and not straight),
+            ('tuner_hole_preset', on),
+            ('tuner_hole_custom', on and custom_hole),
+            ('tuner_clearance', on),
+            # The manual head-line length is superseded (per string) while
+            # the tuner feature is on; its stored value is preserved.
+            ('headstock_length', not on),
+        ):
             command_input = inputs.itemById(input_id)
             if command_input:
                 command_input.isVisible = visible
@@ -1559,22 +2139,154 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         value_input(rg, 'radius_end', 'Radius at board end', 'radius_end_expr')
         self._apply_radius_visibility(inputs, settings['radius_mode'])
 
-        hardware_group = inputs.addGroupCommandInput(
-            'grp_hardware', 'Hardware (coming soon)')
-        hardware_group.isExpanded = False
+        def angle_input(container, input_id, label, expr_key):
+            # Same fallback dance as value_input, but in degree units (the
+            # length-only value_input cannot host an angle).
+            for expression in (settings[expr_key], DEFAULTS[expr_key]):
+                try:
+                    container.addValueInput(
+                        input_id, label, 'deg',
+                        adsk.core.ValueInput.createByString(expression))
+                    return
+                except Exception:
+                    if inputs.itemById(input_id):
+                        return
+
+        hardware_group = inputs.addGroupCommandInput('grp_hardware', 'Hardware')
+        hardware_group.isExpanded = bool(settings['place_tuners'])
         hg = hardware_group.children
         tuners_checkbox = hg.addBoolValueInput(
-            'place_tuners', 'Tuner layout', True, '', False)
-        tuners_checkbox.isEnabled = False
+            'place_tuners', 'Tuner layout', True, '',
+            bool(settings['place_tuners']))
         tuners_checkbox.tooltip = (
-            'Planned: tuner hole positions laid out along the headstock '
-            'extensions of the string lines.')
+            'Place tuner post positions: hole circles and center points, as '
+            'a reference sketch (no cutting). Straight pull puts each post '
+            'on its own string line; Pattern uses fixed rows the strings '
+            'angle toward (classic 3+3). See HARDWARE_RESEARCH.md.')
+
+        mode_dropdown = hg.addDropDownCommandInput(
+            'tuner_mode', 'Placement',
+            adsk.core.DropDownStyles.TextListDropDownStyle)
+        for mode in TUNER_MODES:
+            mode_dropdown.listItems.add(mode, mode == settings['tuner_mode'], '')
+        mode_dropdown.tooltip = (
+            'Straight pull: posts sit ON the extended string lines, distances '
+            'are PLAN (top view) values along the neck. Pattern: two fixed '
+            'rows parallel to the center line, distances are measured along '
+            'the wood surface (template-true).')
+
+        hg.addIntegerSpinnerCommandInput(
+            'tuner_bass_count', 'Bass-side posts', 0, 12, 1,
+            int(settings['tuner_bass_count']))
+        bass_spinner = inputs.itemById('tuner_bass_count')
+        if bass_spinner:
+            bass_spinner.tooltip = (
+                'How many posts on the bass row; the rest go to the treble '
+                'row. 6 strings: 6 = inline, 3 = 3+3, 4 = 4+2.')
+
+        hg.addBoolValueInput('tuner_reversed', 'Reversed headstock', True, '',
+                             bool(settings['tuner_reversed']))
+        reversed_checkbox = inputs.itemById('tuner_reversed')
+        if reversed_checkbox:
+            reversed_checkbox.tooltip = (
+                'Mirror the headstock: the nearest post moves to the '
+                'opposite outer string and the rows swap sides (a reversed '
+                'inline puts the low E farthest). No-op for a symmetric '
+                '3+3 pattern. This is NOT a left-handed layout.')
+
+        angle_input(hg, 'headstock_angle', 'Headstock angle',
+                    'headstock_angle_expr')
+        angle_input_ref = inputs.itemById('headstock_angle')
+        if angle_input_ref:
+            angle_input_ref.tooltip = (
+                '0 = flat (Fender-style) headstock: posts are drawn on the '
+                'fretboard plane. Tilted (common: 10 PRS, 14, 17 Gibson): '
+                'posts are drawn on a tilted construction plane in TRUE face '
+                'distances — drill perpendicular to that face. Single-scale '
+                'layouts only.')
+        value_input(hg, 'break_offset', 'Break line behind nut',
+                    'break_offset_expr')
+        break_input = inputs.itemById('break_offset')
+        if break_input:
+            break_input.tooltip = (
+                'Where the headstock face starts tilting, measured behind '
+                'fret 0 (plan view). Set it to at least your nut slot width '
+                '(default 3.5 mm suits a typical nut); scarf joints break '
+                'farther out. Used only when the angle is > 0.')
+        value_input(hg, 'face_drop', 'Face drop below top', 'face_drop_expr')
+        drop_input = inputs.itemById('face_drop')
+        if drop_input:
+            drop_input.tooltip = (
+                'How far below the fretboard TOP the headstock face plane '
+                'sits at the break line (about the fretboard thickness). '
+                'Used only when the angle is > 0. Note: a ruler hooked where '
+                'the nut meets the face reads about face_drop*sin(angle) off '
+                'this sketch origin.')
+
+        value_input(hg, 'tuner_first', 'First post from nut', 'tuner_first_expr')
+        first_input = inputs.itemById('tuner_first')
+        if first_input:
+            first_input.tooltip = (
+                'Plan-view distance from fret 0 to the nearest post, along '
+                'the neck. 41.9 mm is the Fender-documented 1.650" (its '
+                'exact nut reference edge is unverified — adjust by the nut '
+                'thickness if your drawing measures from the back edge).')
+        value_input(hg, 'tuner_spacing', 'Post spacing (along neck)',
+                    'tuner_spacing_expr')
+        spacing_input = inputs.itemById('tuner_spacing')
+        if spacing_input:
+            spacing_input.tooltip = (
+                'Plan-view distance between consecutive post stations. '
+                '23.3 mm = Fender 0.919"; vintage Kluson rows want 23.8 mm '
+                '(15/16"), modern retrofits 25.4 mm (1"). With a split '
+                '(3+3, 4+2) the stations interleave between the two rows so '
+                'converging inner strings never collide.')
+
+        value_input(hg, 'pattern_first', 'First post from nut (surface)',
+                    'pattern_first_expr')
+        value_input(hg, 'pattern_pitch', 'Post pitch per side',
+                    'pattern_pitch_expr')
+        pitch_input = inputs.itemById('pattern_pitch')
+        if pitch_input:
+            pitch_input.tooltip = ('35 mm is the canonical Kluson/Waverly '
+                                   '3+3 spacing, electric and acoustic.')
+        value_input(hg, 'pattern_row_offset', 'Row offset from center',
+                    'pattern_row_offset_expr')
+        row_input = inputs.itemById('pattern_row_offset')
+        if row_input:
+            row_input.tooltip = ('Lateral distance of each post row from the '
+                                 'neck center line, at the first post.')
+        value_input(hg, 'pattern_row_slant', 'Row slant per station',
+                    'pattern_row_slant_expr')
+        slant_input = inputs.itemById('pattern_row_slant')
+        if slant_input:
+            slant_input.tooltip = (
+                'How much each row steps toward the center line per station. '
+                '0 = rows parallel to the neck (Gibson 3+3). 7.14 mm (0.281") '
+                'per 23.3 mm pitch reproduces Fender\'s 17-degree inline row.')
+
+        hole_dropdown = hg.addDropDownCommandInput(
+            'tuner_hole_preset', 'Post hole',
+            adsk.core.DropDownStyles.TextListDropDownStyle)
+        for name, _diameter in HOLE_PRESETS:
+            hole_dropdown.listItems.add(name, name == settings['tuner_hole_preset'], '')
+        value_input(hg, 'tuner_hole_custom', 'Hole diameter', 'tuner_hole_expr')
+        value_input(hg, 'tuner_clearance', 'Housing clearance margin',
+                    'tuner_clearance_expr')
+        clearance_input = inputs.itemById('tuner_clearance')
+        if clearance_input:
+            clearance_input.tooltip = (
+                'Warn when two post centers are closer than hole diameter + '
+                'this margin (tuner housings/buttons collide). 8 mm suits '
+                'typical sealed housings; 0 disables the extra margin.')
+
         bridge_hw_checkbox = hg.addBoolValueInput(
-            'place_bridge', 'Bridge hardware', True, '', False)
+            'place_bridge', 'Bridge hardware (coming soon)', True, '', False)
         bridge_hw_checkbox.isEnabled = False
         bridge_hw_checkbox.tooltip = (
-            'Planned: bridge/saddle footprint placed on the bridge mark, '
-            'with per-string compensation.')
+            'Planned: per-string compensated saddle points and mounting '
+            'footprint presets at the bridge mark — see HARDWARE_RESEARCH.md.')
+        self._apply_tuner_visibility(inputs)
 
         inputs.addTextBoxCommandInput(
             'info_box', 'Info',
@@ -1609,6 +2321,10 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             item = changed_input.selectedItem
             self._apply_radius_visibility(command_inputs,
                                           item.name if item else 'No radius')
+
+        if changed_input.id in ('place_tuners', 'tuner_mode',
+                                'tuner_hole_preset'):
+            self._apply_tuner_visibility(command_inputs)
 
         if changed_input.id == 'top_plane':
             entity = _get_selected(command_inputs, 'top_plane')
@@ -1708,6 +2424,17 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             ('treble_scale_expr', 'treble_scale'),
             ('radius_start_expr', 'radius_start'),
             ('radius_end_expr', 'radius_end'),
+            ('headstock_angle_expr', 'headstock_angle'),
+            ('face_drop_expr', 'face_drop'),
+            ('break_offset_expr', 'break_offset'),
+            ('tuner_first_expr', 'tuner_first'),
+            ('tuner_spacing_expr', 'tuner_spacing'),
+            ('pattern_first_expr', 'pattern_first'),
+            ('pattern_pitch_expr', 'pattern_pitch'),
+            ('pattern_row_offset_expr', 'pattern_row_offset'),
+            ('pattern_row_slant_expr', 'pattern_row_slant'),
+            ('tuner_hole_expr', 'tuner_hole_custom'),
+            ('tuner_clearance_expr', 'tuner_clearance'),
         ):
             value_input = inputs.itemById(input_id)
             if value_input:
@@ -1715,7 +2442,8 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
 
         for key, input_id in (('fret_count', 'fret_count'),
                               ('string_count', 'string_count'),
-                              ('perpendicular_fret', 'perpendicular_fret')):
+                              ('perpendicular_fret', 'perpendicular_fret'),
+                              ('tuner_bass_count', 'tuner_bass_count')):
             spinner = inputs.itemById(input_id)
             if spinner:
                 settings[key] = int(spinner.value)
@@ -1727,13 +2455,18 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
                               ('draw_strings', 'draw_strings'),
                               ('draw_taper', 'draw_taper'),
                               ('cut_taper', 'cut_taper'),
-                              ('multiscale', 'multiscale')):
+                              ('multiscale', 'multiscale'),
+                              ('place_tuners', 'place_tuners'),
+                              ('tuner_reversed', 'tuner_reversed')):
             checkbox = inputs.itemById(input_id)
             if checkbox:
                 settings[key] = bool(checkbox.value)
 
-        dropdown = inputs.itemById('radius_mode')
-        if dropdown and dropdown.selectedItem:
-            settings['radius_mode'] = dropdown.selectedItem.name
+        for key, input_id in (('radius_mode', 'radius_mode'),
+                              ('tuner_mode', 'tuner_mode'),
+                              ('tuner_hole_preset', 'tuner_hole_preset')):
+            dropdown = inputs.itemById(input_id)
+            if dropdown and dropdown.selectedItem:
+                settings[key] = dropdown.selectedItem.name
 
         save_settings(settings)
