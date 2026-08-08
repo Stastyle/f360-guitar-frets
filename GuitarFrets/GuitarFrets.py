@@ -1,7 +1,8 @@
-# Guitar fret slot layout add-in.
-# "Create Fret Slots" lays out the whole neck: fret slots (standard or
-# fanned), nut slot, string lines, board outline, radius and cuts. The button
-# lives in a "Guitar Frets" panel on the Utilities tab and in Solid > Create.
+# Guitar fretboard generator add-in.
+# "Create Fretboard" creates the whole fretboard from scratch: the tapered
+# board body, fret slots (standard or fanned), nut slot, string lines, radius
+# and tuner layout. The button lives in a "Guitar Frets" panel on the
+# Utilities tab and in Solid > Create.
 
 import traceback
 
@@ -14,9 +15,10 @@ UTILITIES_PANEL_ID = 'GuitarFretsPanel'
 UTILITIES_PANEL_NAME = 'Guitar Frets'
 
 cmd_create = {
-    'cmd_name': 'Create Fret Slots',
-    'cmd_description': 'Lay out a guitar neck: fret slots (standard or fanned), '
-                       'nut slot, string lines, board outline, radius and cuts',
+    'cmd_name': 'Create Fretboard',
+    'cmd_description': 'Create a complete fretboard from scratch: the tapered '
+                       'board body, fret slots (standard or fanned), nut slot, '
+                       'string lines, radius and tuner layout',
     'cmd_resources': './resources/create_fret_slots',
     'cmd_id': 'cmdID_GuitarFrets_Create',
     'workspace': 'FusionSolidEnvironment',

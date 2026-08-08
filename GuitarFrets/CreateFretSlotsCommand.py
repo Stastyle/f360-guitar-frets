@@ -1,7 +1,9 @@
-# "Create Fret Slots" command: lays out a guitar neck on the fretboard top —
-# fret slot rectangles (standard or multi-scale/fanned), an optional nut slot,
-# a bridge mark, string guide lines, a tapered board outline, an optional
-# single/compound radius cut, and an optional Push/Pull cut of the slots.
+# "Create Fretboard" command: creates a complete fretboard from scratch as a
+# new component — the tapered board body itself, fret slots (standard or
+# multi-scale/fanned) as sketch or cut, an optional nut slot, a bridge mark,
+# string guide lines, an optional single/compound radius cut, and a tuner
+# post layout. Nothing has to exist beforehand: fret 0 sits at the component
+# origin, the neck runs along +X, and the board top lies on the XY plane.
 # An existing layout can be picked from the Edit dropdown and rebuilt in place.
 
 import json
@@ -25,21 +27,19 @@ DEFAULTS = {
     'slot_length_expr': '60 mm',
     'create_nut_slot': False,
     'nut_slot_width_expr': '3.5 mm',
-    'nut_slot_offset_expr': '0 mm',
     'nut_slot_depth_expr': '1.5 mm',
-    'cut_slots': False,
+    'cut_slots': True,
     'slot_depth_expr': '2.5 mm',
     'mark_bridge': True,
-    'flip_direction': False,
     'draw_strings': True,
     'string_count': 6,
     'string_spread_nut_expr': '35 mm',
     'string_spread_bridge_expr': '52.5 mm',
     'headstock_length_expr': '150 mm',
-    'draw_taper': True,
+    'board_thickness_expr': '6 mm',
+    'board_setback_expr': '0 mm',
     'nut_width_expr': '43 mm',
     'board_overhang_expr': '5 mm',
-    'cut_taper': False,
     'multiscale': False,
     'bass_scale_expr': '26.5 in',
     'treble_scale_expr': '25.5 in',
@@ -66,7 +66,76 @@ DEFAULTS = {
     'buttons_promoted': False,
 }
 
-CREATE_NEW_LABEL = 'Create new sketch'
+# Settings key -> dialog input id. Used in both directions: to refill the
+# dialog from a settings dict (_apply_settings) and to store the dialog back
+# into settings.json (on_destroy). Keep in sync with the inputs on_create adds.
+EXPRESSION_INPUTS = (
+    ('scale_length_expr', 'scale_length'),
+    ('slot_width_expr', 'slot_width'),
+    ('slot_length_expr', 'slot_length'),
+    ('nut_slot_width_expr', 'nut_slot_width'),
+    ('nut_slot_depth_expr', 'nut_slot_depth'),
+    ('slot_depth_expr', 'slot_depth'),
+    ('string_spread_nut_expr', 'string_spread_nut'),
+    ('string_spread_bridge_expr', 'string_spread_bridge'),
+    ('headstock_length_expr', 'headstock_length'),
+    ('board_thickness_expr', 'board_thickness'),
+    ('board_setback_expr', 'board_setback'),
+    ('nut_width_expr', 'nut_width'),
+    ('board_overhang_expr', 'board_overhang'),
+    ('bass_scale_expr', 'bass_scale'),
+    ('treble_scale_expr', 'treble_scale'),
+    ('radius_start_expr', 'radius_start'),
+    ('radius_end_expr', 'radius_end'),
+    ('headstock_angle_expr', 'headstock_angle'),
+    ('face_drop_expr', 'face_drop'),
+    ('break_offset_expr', 'break_offset'),
+    ('tuner_first_expr', 'tuner_first'),
+    ('tuner_spacing_expr', 'tuner_spacing'),
+    ('pattern_first_expr', 'pattern_first'),
+    ('pattern_pitch_expr', 'pattern_pitch'),
+    ('pattern_row_offset_expr', 'pattern_row_offset'),
+    ('pattern_row_slant_expr', 'pattern_row_slant'),
+    ('tuner_hole_expr', 'tuner_hole_custom'),
+    ('tuner_clearance_expr', 'tuner_clearance'),
+)
+# (settings key, input id, minimum, maximum) — the range is the spinner's own,
+# a stored value outside it is ignored rather than clamped.
+SPINNER_INPUTS = (
+    ('fret_count', 'fret_count', 1, 36),
+    ('string_count', 'string_count', 1, 12),
+    ('perpendicular_fret', 'perpendicular_fret', 0, 36),
+    ('tuner_bass_count', 'tuner_bass_count', 0, 12),
+)
+CHECKBOX_INPUTS = (
+    ('create_nut_slot', 'create_nut_slot'),
+    ('cut_slots', 'cut_slots'),
+    ('mark_bridge', 'mark_bridge'),
+    ('draw_strings', 'draw_strings'),
+    ('multiscale', 'multiscale'),
+    ('place_tuners', 'place_tuners'),
+    ('tuner_reversed', 'tuner_reversed'),
+)
+DROPDOWN_INPUTS = (
+    ('radius_mode', 'radius_mode'),
+    ('tuner_mode', 'tuner_mode'),
+    ('tuner_hole_preset', 'tuner_hole_preset'),
+)
+# (group input id, settings key that decides whether it starts expanded)
+GROUP_EXPANDERS = (
+    ('grp_multiscale', 'multiscale'),
+    ('grp_strings', 'draw_strings'),
+    ('grp_radius', 'radius_mode'),
+    ('grp_hardware', 'place_tuners'),
+)
+
+# The first two entries of the Start-from dropdown create a new fretboard;
+# everything after them is an existing layout to edit (_edit_sketch_from_inputs
+# maps a selection back to self._edit_sketches by this offset).
+CREATE_NEW_LABEL = 'New fretboard (last used values)'
+CREATE_DEFAULT_LABEL = 'New fretboard (default values)'
+NEW_LAYOUT_LABELS = (CREATE_NEW_LABEL, CREATE_DEFAULT_LABEL)
+
 RADIUS_MODES = ('No radius', 'Single radius', 'Compound radius')
 TUNER_MODES = ('Straight pull', 'Pattern (two rows)')
 # Peghead hole diameters in cm (Fusion internal units); see HARDWARE_RESEARCH.md.
@@ -77,19 +146,13 @@ HOLE_PRESETS = (
 )
 MAX_HEADSTOCK_ANGLE = math.radians(25.0)
 
-# sin(1 deg): the fret-zero reference may not be (nearly) parallel to the
-# center line, or fret 0 cannot be located on it.
-MIN_REF_ANGLE_SIN = 0.0175
-COS_MIN_REF_ANGLE = 0.99985
-# sin(15 deg): center line must lie roughly in the fretboard plane.
+# sin(15 deg): sanity limit for the sketch-frame mapping (see _sketch_frame).
 OUT_OF_PLANE_SIN_LIMIT = 0.2588
 
-TANGENT_PLANE_MESSAGE = (
-    'The selected fretboard top is not planar (radiused board?). '
-    'Create a plane tangent to the board (Construct > Tangent Plane), '
-    'project the board outline onto it, draw the center line in that sketch, '
-    'and select the tangent plane here instead.'
-)
+# Layouts of metadata version >= 7 own their board (created-board flow);
+# older sketches cut a pre-existing board via selections the dialog no
+# longer has, so they cannot be rebuilt and are hidden from Edit.
+MIN_EDITABLE_METADATA_VERSION = 7
 
 
 class FretSlotsError(Exception):
@@ -108,6 +171,12 @@ def load_settings():
         for key in DEFAULTS:
             if key in stored and isinstance(stored[key], type(DEFAULTS[key])):
                 settings[key] = stored[key]
+        # Settings from the cut-a-board era stored a nut offset (the layout
+        # shifted into the board); the created-board equivalent is starting
+        # the board that far behind the nut.
+        if 'board_setback_expr' not in stored and isinstance(
+                stored.get('nut_slot_offset_expr'), str):
+            settings['board_setback_expr'] = stored['nut_slot_offset_expr']
     except Exception:
         pass
     if settings['radius_mode'] not in RADIUS_MODES:
@@ -125,13 +194,6 @@ def save_settings(settings):
             json.dump(settings, handle, indent=2)
     except Exception:
         pass
-
-
-def _get_selected(inputs, input_id):
-    selection_input = inputs.itemById(input_id)
-    if not selection_input or selection_input.selectionCount == 0:
-        return None
-    return selection_input.selection(0).entity
 
 
 def _entity_token(entity):
@@ -152,124 +214,19 @@ def _sketch_metadata(sketch):
 
 
 def _find_fret_sketches(design):
-    """Every sketch this add-in tagged as a fret slot layout."""
+    """Every sketch this add-in tagged as a rebuildable fret layout."""
     sketches = []
     for attribute in design.findAttributes(ATTRIBUTE_GROUP, ATTRIBUTE_NAME):
         parent = attribute.parent
         if not parent:  # the sketch was deleted; attributes can outlive entities
             continue
         sketch = adsk.fusion.Sketch.cast(parent)
-        if sketch and sketch.isValid:
+        if not (sketch and sketch.isValid):
+            continue
+        version = _sketch_metadata(sketch).get('version', 0)
+        if isinstance(version, int) and version >= MIN_EDITABLE_METADATA_VERSION:
             sketches.append(sketch)
     return sketches
-
-
-def _sketch_instances(design, sketch):
-    """The sketch itself, or its proxies when its component occurs in the assembly."""
-    occurrences = design.rootComponent.allOccurrencesByComponent(sketch.parentComponent)
-    if occurrences.count == 0:
-        return [sketch]
-
-    instances = []
-    for i in range(occurrences.count):
-        try:
-            instances.append(sketch.createForAssemblyContext(occurrences.item(i)))
-        except Exception:
-            pass
-    return instances or [sketch]
-
-
-def _top_plane_geometry(entity):
-    """Plane of the fretboard top selection, or None when it is not planar."""
-    face = adsk.fusion.BRepFace.cast(entity)
-    if face:
-        if face.geometry.surfaceType != adsk.core.SurfaceTypes.PlaneSurfaceType:
-            return None
-        return adsk.core.Plane.cast(face.geometry)
-    plane = adsk.fusion.ConstructionPlane.cast(entity)
-    if plane:
-        return plane.geometry
-    return None
-
-
-def _line_geometry(entity):
-    """World-space Line3D of a sketch line or linear edge, or None."""
-    line = adsk.fusion.SketchLine.cast(entity)
-    if line:
-        return line.worldGeometry
-    edge = adsk.fusion.BRepEdge.cast(entity)
-    if edge:
-        return adsk.core.Line3D.cast(edge.geometry)
-    return None
-
-
-def _unit_direction(line3d):
-    direction = line3d.startPoint.vectorTo(line3d.endPoint)
-    if direction.length < 1e-9:
-        return None
-    direction.normalize()
-    return direction
-
-
-def _fret_zero_point(reference, centerline, center_direction):
-    """Intersect the fret-zero reference with the center line.
-
-    reference is either a planar BRepFace (nut face or fretboard end face) or
-    a SketchLine drawn across the neck at the nut position. Returns a Point3D
-    on the center line. Raises FretSlotsError on degenerate geometry.
-    """
-    face = adsk.fusion.BRepFace.cast(reference)
-    if face:
-        plane = adsk.core.Plane.cast(face.geometry)
-        if abs(center_direction.dotProduct(plane.normal)) < MIN_REF_ANGLE_SIN:
-            raise FretSlotsError('The fret-zero face is (nearly) parallel to the '
-                                 'center line, so fret 0 cannot be located.')
-        infinite_line = adsk.core.InfiniteLine3D.create(centerline.startPoint,
-                                                        center_direction)
-        point = plane.intersectWithLine(infinite_line)
-        if not point:
-            raise FretSlotsError('The center line does not cross the fret-zero '
-                                 'face plane.')
-        return point
-
-    reference_geometry = _line_geometry(reference)
-    if not reference_geometry:
-        raise FretSlotsError('Could not read the fret-zero reference geometry.')
-    reference_direction = _unit_direction(reference_geometry)
-    if not reference_direction:
-        raise FretSlotsError('The fret-zero line has zero length.')
-    if abs(center_direction.dotProduct(reference_direction)) > COS_MIN_REF_ANGLE:
-        raise FretSlotsError('The fret-zero line is (nearly) parallel to the '
-                             'center line. Draw it across the neck at the nut '
-                             'position.')
-
-    try:
-        t = fret_math.closest_point_parameter(
-            centerline.startPoint.asArray(), center_direction.asArray(),
-            reference_geometry.startPoint.asArray(), reference_direction.asArray())
-    except ValueError as error:
-        raise FretSlotsError('Could not locate fret 0 on the center line: {}'
-                             .format(error))
-    return adsk.core.Point3D.create(
-        centerline.startPoint.x + t * center_direction.x,
-        centerline.startPoint.y + t * center_direction.y,
-        centerline.startPoint.z + t * center_direction.z)
-
-
-def _neck_direction(centerline, fret_zero, flip):
-    """Unit vector from fret 0 toward the far end of the center line."""
-    to_start = fret_zero.distanceTo(centerline.startPoint)
-    to_end = fret_zero.distanceTo(centerline.endPoint)
-    target = centerline.endPoint if to_end >= to_start else centerline.startPoint
-
-    direction = fret_zero.vectorTo(target)
-    if direction.length < 1e-9:
-        raise FretSlotsError('Could not determine the neck direction: fret 0 '
-                             'sits on the far end of the center line.')
-    direction.normalize()
-    if flip:
-        direction.scaleBy(-1.0)
-    return direction
 
 
 def _read_values(inputs):
@@ -295,6 +252,7 @@ def _read_values(inputs):
     for input_id, label in (
         ('slot_width', 'Fret slot width'),
         ('slot_length', 'Fret slot length'),
+        ('board_thickness', 'Board thickness'),
         ('string_spread_nut', 'String spread at nut'),
         ('string_spread_bridge', 'String spread at bridge'),
         ('nut_width', 'Nut width'),
@@ -335,17 +293,6 @@ def _read_values(inputs):
     cut_checkbox = inputs.itemById('cut_slots')
     cut_enabled = bool(cut_checkbox.value) if cut_checkbox else False
 
-    # The nut offset shifts fret 0 (and the whole layout with it), so it is
-    # read regardless of the nut slot checkbox. It may be zero or negative.
-    values['nut_slot_offset'] = 0.0
-    offset_input = inputs.itemById('nut_slot_offset')
-    if offset_input:
-        if offset_input.isValidExpression:
-            values['nut_slot_offset'] = offset_input.value
-        else:
-            problems['nut_slot_offset'] = ('Nut offset: enter a valid '
-                                           'length (0 for none).')
-
     checkbox = inputs.itemById('create_nut_slot')
     values['nut_slot_width'] = None
     values['nut_slot_depth'] = None
@@ -375,10 +322,7 @@ def _read_values(inputs):
             values['radius_end'] = values['radius_start']
 
     for key, input_id in (('mark_bridge', 'mark_bridge'),
-                          ('draw_strings', 'draw_strings'),
-                          ('draw_taper', 'draw_taper'),
-                          ('cut_taper', 'cut_taper'),
-                          ('flip', 'flip_direction')):
+                          ('draw_strings', 'draw_strings')):
         checkbox = inputs.itemById(input_id)
         values[key] = bool(checkbox.value) if checkbox else False
 
@@ -396,6 +340,9 @@ def _read_values(inputs):
             problems[input_id] = '{}: too large.'.format(label)
             return None
         return value
+
+    values['board_setback'] = read_nonnegative(
+        'board_setback', 'Board start behind nut') or 0.0
 
     values['place_tuners'] = place_tuners_on
     values['tuner_mode'] = None
@@ -452,58 +399,16 @@ def _read_values(inputs):
     return values, list(problems.values())
 
 
-def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
+def validate_and_compute(inputs, edit_sketch=None):
     """Validate all inputs. Returns (ok, message, params)."""
     app = adsk.core.Application.get()
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
         return False, 'Open a design in the Design workspace first.', None
 
-    problems = []
-    ref_entity = _get_selected(inputs, 'fret_zero_ref')
-    top_entity = _get_selected(inputs, 'top_plane')
-    line_entity = _get_selected(inputs, 'center_line')
-
-    # A layout that has a radius cut has no flat top face anymore; on edit,
-    # build_slots removes the old radius (restoring the face) and re-resolves
-    # it from the stored token, so an empty top selection is allowed there.
-    edit_metadata = _sketch_metadata(edit_sketch) if edit_sketch else {}
-    top_restorable = bool(edit_metadata.get('radius_feature_token')
-                          and edit_metadata.get('top_token'))
-
-    if not ref_entity:
-        problems.append('Select the fret-zero reference: the nut face looking '
-                        'toward the neck, the fretboard end face where the nut '
-                        'will go, or a sketch line at the nut position.')
-    if not top_entity and not top_restorable:
-        problems.append(TANGENT_PLANE_MESSAGE if radius_rejected
-                        else 'Select the fretboard top face (or a tangent construction plane).')
-    if not line_entity:
-        problems.append('Select the fretboard center line (sketch line or linear edge).')
-
-    values, value_problems = _read_values(inputs)
-    problems.extend(value_problems)
+    values, problems = _read_values(inputs)
     if problems:
         return False, '\n'.join(problems), None
-
-    top_plane = _top_plane_geometry(top_entity) if top_entity else None
-    if top_entity and top_plane is None:
-        return False, TANGENT_PLANE_MESSAGE, None
-
-    centerline = _line_geometry(line_entity)
-    center_direction = _unit_direction(centerline) if centerline else None
-    if not center_direction:
-        return False, 'Could not read a straight line from the center line selection.', None
-
-    if top_plane and abs(center_direction.dotProduct(top_plane.normal)) > OUT_OF_PLANE_SIN_LIMIT:
-        return False, ('The center line runs more than 15 degrees out of the '
-                       'fretboard plane. Draw the center line on (or parallel to) '
-                       'the fretboard top.'), None
-
-    try:
-        _fret_zero_point(ref_entity, centerline, center_direction)
-    except FretSlotsError as error:
-        return False, str(error), None
 
     fret_count = values['fret_count']
     slot_width = values['slot_width']
@@ -521,17 +426,26 @@ def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
                            'the last two frets, so slots would overlap. Reduce the '
                            'slot width or the number of frets.'), None
 
-    if values['draw_taper'] and values['nut_width'] <= values['string_spread_nut']:
+    if values['nut_width'] <= values['string_spread_nut']:
         return False, ('Nut width must be larger than the string spread at the '
                        'nut, so the board has an edge margin.'), None
 
-    if values['cut_taper']:
-        if not values['draw_taper']:
-            return False, ('"Cut board to outline" needs "Draw fretboard '
-                           'outline" enabled.'), None
-        if top_entity and not adsk.fusion.BRepFace.cast(top_entity):
-            return False, ('"Cut board to outline" requires selecting the '
-                           'fretboard top FACE (not a construction plane).'), None
+    for depth, label in ((values['cut_depth'], 'Slot depth'),
+                         (values['nut_slot_depth'], 'Nut slot depth')):
+        if depth and depth >= values['board_thickness']:
+            return False, ('{} must be smaller than the board thickness — the '
+                           'cut would go clean through the board.'.format(label)), None
+
+    if values['nut_slot_width'] and values['cut_depth']:
+        # The nut seat extends behind the nut line and the board front edge
+        # runs parallel to that line (fanned or not), so without a board
+        # setback there is no material under the seat to cut — the fan skew
+        # contributes nothing.
+        if values['board_setback'] <= 1e-9:
+            return False, ('The nut slot lies entirely behind the board front '
+                           'edge, so there is nothing to cut it into. Raise '
+                           '"Board start behind nut" (the nut slot width '
+                           'covers the whole seat).'), None
 
     if values['place_tuners']:
         if values['tuner_bass_count'] > values['string_count']:
@@ -546,10 +460,6 @@ def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
                            'multi-scale layouts yet — set the headstock angle '
                            'to 0 (the plan-view posts stay correct).'), None
         if values['headstock_angle'] > 1e-9:
-            if top_entity and not adsk.fusion.BRepFace.cast(top_entity):
-                return False, ('A tilted headstock plane requires selecting '
-                               'the flat fretboard top FACE (not a '
-                               'construction plane).'), None
             first = (values.get('tuner_first')
                      if values['tuner_mode'] == 'straight'
                      else values.get('pattern_first'))
@@ -560,34 +470,36 @@ def validate_and_compute(inputs, radius_rejected=False, edit_sketch=None):
 
     radius_span = half_span
     if values['radius_mode']:
-        if top_entity and not adsk.fusion.BRepFace.cast(top_entity):
-            return False, ('Radius requires selecting the flat fretboard top '
-                           'FACE (not a construction plane).'), None
-        if values['draw_taper']:
-            # The radius cut must cover the board at its widest point, or the
-            # loft leaves flat shoulders along the edges near the board end.
-            try:
-                probe = fret_math.slot_layout(
-                    values['bass_scale'], values['treble_scale'], fret_count,
-                    values['perpendicular_fret'], half_span, slot_width)
-                corners = fret_math.taper_outline(
-                    probe['fret_zero'], probe['bridge'], probe['last'],
-                    values['string_spread_nut'], values['string_spread_bridge'],
-                    values['nut_width'], values['board_overhang'])
-                radius_span = max(half_span,
-                                  max(abs(corner[1]) for corner in corners) * 1.02)
-            except ValueError:
-                pass
+        # The radius cut must cover the board at its widest point, or the
+        # loft leaves flat shoulders along the edges near the board end.
+        try:
+            probe = fret_math.slot_layout(
+                values['bass_scale'], values['treble_scale'], fret_count,
+                values['perpendicular_fret'], half_span, slot_width)
+            corners = fret_math.taper_outline(
+                probe['fret_zero'], probe['bridge'], probe['last'],
+                values['string_spread_nut'], values['string_spread_bridge'],
+                values['nut_width'], values['board_overhang'],
+                setback=values['board_setback'])
+            radius_span = max(half_span,
+                              max(abs(corner[1]) for corner in corners) * 1.02)
+        except ValueError:
+            pass
         for radius in (values['radius_start'], values['radius_end']):
             if radius <= radius_span * 1.02:
                 return False, ('The fretboard radius must be larger than half '
                                'the board width at its widest point (and half '
                                'the fret slot length).'), None
+        min_radius = min(values['radius_start'], values['radius_end'])
+        drop = min_radius - math.sqrt(max(0.0, min_radius ** 2
+                                          - radius_span ** 2))
+        if drop >= values['board_thickness']:
+            return False, ('The radius cut would remove the full board '
+                           'thickness at the edges — use a larger radius, a '
+                           'shorter fret slot length, or a thicker '
+                           'board.'), None
 
     params = _Params()
-    params.fret_zero_ref = ref_entity
-    params.top_entity = top_entity
-    params.center_line = line_entity
     for key, value in values.items():
         setattr(params, key, value)
     params.half_span = half_span
@@ -642,15 +554,20 @@ def _success_message(units_manager, params):
     if params.nut_slot_width:
         rear, front = fret_math.nut_slot_span(
             params.bass_scale, params.treble_scale, params.perpendicular_fret,
-            params.nut_slot_width, params.nut_slot_offset)
-        lines.append('Nut slot spans {} to {} from the selected fret-zero '
-                     'reference (negative = behind it). The board must cover '
-                     'that span, or part of the seat is cut in the air — '
-                     'increase the nut offset to push it in.'
+            params.nut_slot_width)
+        lines.append('Nut slot spans {} to {} around fret 0 (negative = '
+                     'behind it, toward the headstock).'
                      .format(fmt(rear), fmt(front)))
-    elif params.nut_slot_offset:
-        lines.append('Whole layout shifted {} from the fret-zero reference.'
-                     .format(fmt(params.nut_slot_offset)))
+        # Coverage is perpendicular to the (possibly fanned) nut line, which
+        # the board front edge parallels — the fan skew covers nothing.
+        required = fret_math.nut_seat_setback_required(
+            params.bass_scale, params.treble_scale, params.perpendicular_fret,
+            params.half_span, params.nut_slot_width)
+        if params.board_setback + 1e-9 < required:
+            lines.append('WARNING: the board starts only {} behind fret 0, so '
+                         'part of the nut seat hangs off the board front — '
+                         'raise "Board start behind nut" to {} to cover it.'
+                         .format(fmt(params.board_setback), fmt(required)))
     if params.place_tuners:
         try:
             probe = fret_math.slot_layout(
@@ -690,15 +607,20 @@ def _success_message(units_manager, params):
                              'the spacing/pitch or change the split.'
                              .format(i + 1, j + 1, fmt(distance)))
 
+    board_length = (params.board_setback
+                    + fret_math.fret_distance(center_scale, params.fret_count)
+                    + params.board_overhang)
+    lines.append('Board: about {} long, {} wide at the nut, {} thick.'
+                 .format(fmt(board_length), fmt(params.nut_width),
+                         fmt(params.board_thickness)))
+
     slot_count = params.fret_count + (1 if params.nut_slot_width else 0)
     summary = '{} slots'.format(slot_count)
     if params.draw_strings:
         summary += ', {} string lines'.format(params.string_count)
-    if params.draw_taper:
-        summary += ', board outline'
-    if params.cut_taper:
-        summary += ' (board cut to it)'
-    lines.append(summary + '. If frets march the wrong way, check Flip direction.')
+    lines.append(summary + '. The board is built in its own component: '
+                 'fret 0 at the origin, neck along +X, top face on the XY '
+                 'plane — move or joint the component to place it.')
     if params.cut_depth:
         lines.append('Slots will be cut {} deep.'.format(fmt(params.cut_depth)))
     if params.radius_mode:
@@ -707,15 +629,6 @@ def _success_message(units_manager, params):
         lines.append('Radius drop at the slot ends: {} — edge slots end up that '
                      'much shallower.'.format(fmt(drop)))
     return '\n'.join(lines)
-
-
-def _delete_projected_curves(sketch):
-    stale = [curve for curve in sketch.sketchCurves if curve.isReference]
-    for curve in stale:
-        try:
-            curve.deleteMe()
-        except Exception:
-            pass
 
 
 def _fix_all_curves(sketch):
@@ -742,40 +655,14 @@ def _clear_sketch_curves(sketch):
             pass
 
 
-def _create_sketch(top_entity):
-    """Create a sketch on the selected face/plane.
+def _create_sketch(component):
+    """New sketch on the component's XY construction plane (the board top).
 
-    Returns (native_sketch, mapping_sketch): draw into the native sketch;
-    use the mapping sketch (a proxy when the selection lives in an occurrence)
-    to convert root-space points with modelToSketchSpace.
+    Everything is drawn in the fretboard component's own space, so no
+    occurrence/proxy mapping is needed — the canonical frame puts fret 0 at
+    the origin with the neck along +x.
     """
-    face = adsk.fusion.BRepFace.cast(top_entity)
-    if face:
-        context = face.assemblyContext
-        native = face.nativeObject if context else face
-        sketches = native.body.parentComponent.sketches
-        if hasattr(sketches, 'addWithoutEdges'):
-            sketch = sketches.addWithoutEdges(native)
-        else:
-            sketch = sketches.add(native)
-            _delete_projected_curves(sketch)
-    else:
-        plane = adsk.fusion.ConstructionPlane.cast(top_entity)
-        context = plane.assemblyContext
-        native = plane.nativeObject if context else plane
-        sketch = native.component.sketches.add(native)
-
-    mapping_sketch = sketch
-    if context:
-        try:
-            mapping_sketch = sketch.createForAssemblyContext(context)
-        except Exception:
-            sketch.deleteMe()
-            raise FretSlotsError(
-                'The fretboard lives inside a component occurrence that this '
-                'add-in could not map. Activate (Edit in Place) the component '
-                'that contains the fretboard and run the command again.')
-    return sketch, mapping_sketch
+    return component.sketches.add(component.xYConstructionPlane)
 
 
 def _sketch_frame(mapping_sketch, fret_zero, direction):
@@ -819,29 +706,6 @@ def _sketch_name(params, prefix):
     return '{} ({} frets)'.format(prefix, params.fret_count)
 
 
-def _board_body(top_entity):
-    face = adsk.fusion.BRepFace.cast(top_entity)
-    if face:
-        native = face.nativeObject if face.assemblyContext else face
-        return native.body
-    return None
-
-
-def _restore_top_entity(design, metadata):
-    """Re-resolve the flat top face after the old radius cut was removed."""
-    token = metadata.get('top_token') or ''
-    if token:
-        try:
-            for entity in design.findEntityByToken(token):
-                if _top_plane_geometry(entity) is not None:
-                    return entity
-        except Exception:
-            pass
-    raise FretSlotsError('The original fretboard top face could not be '
-                         'restored after removing the old radius cut. Undo '
-                         'and try again, or select the top face manually.')
-
-
 def _delete_tracked(design, metadata):
     """Remove everything a previous run of this add-in created for a layout
     (except the slot sketch itself). Order matters: features first, then the
@@ -849,7 +713,6 @@ def _delete_tracked(design, metadata):
     groups = (
         ('nut_cut_token', adsk.fusion.ExtrudeFeature),
         ('cut_token', adsk.fusion.ExtrudeFeature),
-        ('taper_cut_token', adsk.fusion.ExtrudeFeature),
         ('radius_feature_token', adsk.fusion.LoftFeature),
         ('radius_sketch_tokens', adsk.fusion.Sketch),
         ('radius_plane_tokens', adsk.fusion.ConstructionPlane),
@@ -862,6 +725,8 @@ def _delete_tracked(design, metadata):
         ('tuner_offset_plane_token', adsk.fusion.ConstructionPlane),
         ('bridge_token', adsk.fusion.Sketch),
         ('strings_token', adsk.fusion.Sketch),
+        # The board extrude consumes the outline sketch — feature first.
+        ('board_token', adsk.fusion.ExtrudeFeature),
         ('taper_token', adsk.fusion.Sketch),
     )
     for key, cls in groups:
@@ -903,28 +768,41 @@ def _cut_profiles(sketch, profiles, depth, participant_body, what):
                          'create the sketch only.'.format(what))
 
 
-def _intersect_board_with_outline(taper_sketch, board):
-    """Trim the board body to the taper outline (an Intersect extrude)."""
-    if not board:
-        raise FretSlotsError('"Cut board to outline" requires selecting the '
-                             'fretboard top face.')
+def _extrude_board(taper_sketch, thickness):
+    """Extrude the outline sketch into the fretboard body.
+
+    The board hangs BELOW the sketch plane — the top face stays on the XY
+    plane at z = 0, where all the layout sketches live and where the slot
+    cuts measure their depth from. The extent sign convention is not
+    trusted: a body that ends up above the plane is deleted and redone the
+    other way.
+    """
     if taper_sketch.profiles.count == 0:
         raise FretSlotsError('The fretboard outline did not form a closed '
-                             'profile to cut with.')
-    features = taper_sketch.parentComponent.features.extrudeFeatures
+                             'profile to extrude.')
     profiles = adsk.core.ObjectCollection.create()
     for profile in taper_sketch.profiles:
         profiles.add(profile)
-    try:
-        cut_input = features.createInput(
-            profiles, adsk.fusion.FeatureOperations.IntersectFeatureOperation)
-        # Generous symmetric extent so any board thickness is covered.
-        cut_input.setSymmetricExtent(adsk.core.ValueInput.createByReal(40.0), True)
-        cut_input.participantBodies = [board]
-        return features.add(cut_input)
-    except Exception:
-        raise FretSlotsError('Could not cut the board to the outline — make '
-                             'sure the outline overlaps the board body.')
+    features = taper_sketch.parentComponent.features.extrudeFeatures
+    for signed_thickness in (-thickness, thickness):
+        try:
+            extrude_input = features.createInput(
+                profiles, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            extrude_input.setDistanceExtent(
+                False, adsk.core.ValueInput.createByReal(signed_thickness))
+            feature = features.add(extrude_input)
+        except Exception:
+            continue
+        if feature.bodies.count > 0:
+            box = feature.bodies.item(0).boundingBox
+            if box and box.maxPoint.z <= 1e-4:
+                return feature
+        try:
+            feature.deleteMe()
+        except Exception:
+            pass
+    raise FretSlotsError('Could not extrude the fretboard body from the '
+                         'outline.')
 
 
 def _partition_slot_profiles(sketch, fret_area, nut_area):
@@ -949,48 +827,22 @@ def _partition_slot_profiles(sketch, fret_area, nut_area):
     return fret_profiles, nut_profiles
 
 
-def _top_outward_normal(top_face):
-    # Use the face as selected (a proxy inside an occurrence) so the normal
-    # comes back in root space, consistent with the root-space crown points
-    # and neck direction it is combined with.
-    try:
-        ok, normal = top_face.evaluator.getNormalAtPoint(top_face.pointOnFace)
-        if ok and normal:
-            return normal
-    except Exception:
-        pass
-    try:
-        normal = adsk.core.Plane.cast(top_face.geometry).normal.copy()
-        if top_face.isParamReversed:
-            normal.scaleBy(-1.0)
-        return normal
-    except Exception:
-        raise FretSlotsError('The fretboard top face reference is no longer '
-                             'valid — reselect the top face and try again.')
-
-
-def _apply_radius(params, sketch, mapping_sketch, frame, direction, layout):
+def _apply_radius(params, component, layout, board):
     """Loft-cut a single or compound radius onto the board top.
 
-    Two arc profiles are sketched on transverse planes just behind the nut and
-    just past the board end, then lofted as a cut restricted to the board
-    body. Returns (loft_feature, sketches, planes) for edit-mode tracking.
-    Raises FretSlotsError with a hint when the geometry cannot be built.
+    Two arc profiles are sketched on transverse planes just behind the board
+    front and just past the board end, then lofted as a cut restricted to
+    the board body. Returns (loft_feature, sketches, planes) for edit-mode
+    tracking. Raises FretSlotsError with a hint when the geometry cannot be
+    built.
     """
-    top_face = adsk.fusion.BRepFace.cast(params.top_entity)
-    board = _board_body(params.top_entity)
-    if not (top_face and board):
-        raise FretSlotsError('Radius requires selecting the flat fretboard '
-                             'top face.')
-    context = top_face.assemblyContext
-    native_top = top_face.nativeObject if context else top_face
-    component = native_top.body.parentComponent
-    up = _top_outward_normal(top_face)
+    up = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
 
-    # Stations along the neck (local x): behind the fanned nut and past the
-    # board end, so the loft covers the whole board with margin.
+    # Stations along the neck (local x): behind the (possibly fanned) board
+    # front and past the board end, so the loft covers the whole board with
+    # margin.
     nut_skew = abs(layout['fret_zero'][0][0] - layout['fret_zero'][1][0])
-    back_x = -(2.0 + nut_skew + (params.nut_slot_width or 0.0))
+    back_x = -(2.0 + nut_skew + params.board_setback)
     end_x = max(layout['last'][0][0], layout['last'][1][0]) + params.board_overhang
     front_x = end_x + 1.0
 
@@ -1018,53 +870,47 @@ def _apply_radius(params, sketch, mapping_sketch, frame, direction, layout):
                 pass
         raise FretSlotsError(message)
 
-    # Transverse base plane at fret zero, exactly perpendicular to the neck.
-    # Built from our own construction line in the slot sketch (not the user's
-    # fret-zero reference) so it stays true for fanned layouts, whose nut is
-    # skewed — offsetting a skewed plane would distort the cut radius by
-    # cos²(fan angle) — and so all references live in the board's component.
-    try:
-        transverse = sketch.sketchCurves.sketchLines.addByTwoPoints(
-            _place_point((0.0, -params.half_span), frame),
-            _place_point((0.0, params.half_span), frame))
-        transverse.isConstruction = True
-        plane_input = planes.createInput()
-        plane_input.setByAngle(transverse,
-                               adsk.core.ValueInput.createByReal(math.pi / 2),
-                               native_top)
-        base_plane = planes.add(plane_input)
-        created_planes.append(base_plane)
-        base_entity = base_plane
-        base_normal = base_plane.geometry.normal
-    except Exception:
-        cleanup_and_raise('Could not build the radius reference plane:\n{}'
-                          .format(traceback.format_exc().splitlines()[-1]))
+    def station_plane_and_sketch(station_x):
+        """Transverse plane at local x = station_x plus a sketch on it.
 
-    sign = 1.0 if base_normal.dotProduct(direction) >= 0 else -1.0
+        The component's yZ plane is exactly perpendicular to the neck (+x),
+        for fanned layouts too. The offset sign convention is not trusted:
+        each candidate plane gets a sketch, and the station's crown point
+        must map into it at z ≈ 0, else the other sign is tried.
+        """
+        crown3d = adsk.core.Point3D.create(station_x, 0.0, 0.0)
+        for sign in (1.0, -1.0):
+            try:
+                plane_input = planes.createInput()
+                plane_input.setByOffset(
+                    component.yZConstructionPlane,
+                    adsk.core.ValueInput.createByReal(station_x * sign))
+                plane = planes.add(plane_input)
+            except Exception:
+                continue
+            profile_sketch = component.sketches.add(plane)
+            if abs(profile_sketch.modelToSketchSpace(crown3d.copy()).z) < 1e-3:
+                return plane, profile_sketch, crown3d
+            try:
+                profile_sketch.deleteMe()
+                plane.deleteMe()
+            except Exception:
+                pass
+        cleanup_and_raise('Could not place the transverse radius planes.')
 
     profiles = []
     for station_x in (back_x, front_x):
         radius = radius_at(station_x)
         try:
-            plane_input = planes.createInput()
-            plane_input.setByOffset(
-                base_entity, adsk.core.ValueInput.createByReal(station_x * sign))
-            plane = planes.add(plane_input)
+            plane, profile_sketch, crown3d = station_plane_and_sketch(station_x)
             created_planes.append(plane)
-
-            profile_sketch = component.sketches.add(plane)
             created_sketches.append(profile_sketch)
             profile_sketch.name = 'Radius Profile'
-            sketch_map = (profile_sketch.createForAssemblyContext(context)
-                          if context else profile_sketch)
 
-            crown3d = mapping_sketch.sketchToModelSpace(
-                _place_point((station_x, 0.0), frame))
             up_point = crown3d.copy()
-            up_step = up.copy()
-            up_point.translateBy(up_step)
-            crown2 = sketch_map.modelToSketchSpace(crown3d.copy())
-            up2 = sketch_map.modelToSketchSpace(up_point)
+            up_point.translateBy(up)
+            crown2 = profile_sketch.modelToSketchSpace(crown3d.copy())
+            up2 = profile_sketch.modelToSketchSpace(up_point)
             ux, uy = fret_math.normalize(up2.x - crown2.x, up2.y - crown2.y)
 
             theta = math.asin(min(0.999, params.radius_span / radius))
@@ -1102,7 +948,7 @@ def _apply_radius(params, sketch, mapping_sketch, frame, direction, layout):
         loft_input.loftSections.add(profiles[0])
         loft_input.loftSections.add(profiles[1])
         try:
-            loft_input.participantBodies = [native_top.body]
+            loft_input.participantBodies = [board]
         except Exception:
             pass
         feature = lofts.add(loft_input)
@@ -1114,14 +960,14 @@ def _apply_radius(params, sketch, mapping_sketch, frame, direction, layout):
     return feature, created_sketches, created_planes
 
 
-def _draw_polyline_sketch(params, fret_zero, direction, name, point_pairs,
+def _draw_polyline_sketch(component, fret_zero, direction, name, point_pairs,
                           close_loop=False, construction=False):
-    """Create an extra sketch on the top entity and draw the given local-frame
-    lines into it. point_pairs is a list of (start, end) local points, or a
-    list of corner points when close_loop is True."""
-    sketch, mapping = _create_sketch(params.top_entity)
+    """Create an extra sketch on the board top plane and draw the given
+    local-frame lines into it. point_pairs is a list of (start, end) local
+    points, or a list of corner points when close_loop is True."""
+    sketch = _create_sketch(component)
     try:
-        frame = _sketch_frame(mapping, fret_zero, direction)
+        frame = _sketch_frame(sketch, fret_zero, direction)
         sketch.isComputeDeferred = True
         try:
             lines = sketch.sketchCurves.sketchLines
@@ -1148,14 +994,14 @@ def _draw_polyline_sketch(params, fret_zero, direction, name, point_pairs,
     return sketch
 
 
-def _draw_tuner_plan_sketch(params, fret_zero, direction, tuner_geo):
-    """Flat-headstock (angle 0) tuner sketch on the fretboard-top entity:
+def _draw_tuner_plan_sketch(component, params, fret_zero, direction, tuner_geo):
+    """Flat-headstock (angle 0) tuner sketch on the board top plane:
     a hole circle + center point per post, and nut->post guide lines for
     pattern grids (straight-pull guides would coincide with the string
     extensions)."""
-    sketch, mapping = _create_sketch(params.top_entity)
+    sketch = _create_sketch(component)
     try:
-        frame = _sketch_frame(mapping, fret_zero, direction)
+        frame = _sketch_frame(sketch, fret_zero, direction)
         sketch.isComputeDeferred = True
         try:
             circles = sketch.sketchCurves.sketchCircles
@@ -1182,26 +1028,19 @@ def _draw_tuner_plan_sketch(params, fret_zero, direction, tuner_geo):
     return sketch
 
 
-def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
-                       tuner_geo):
+def _apply_tuner_plane(params, component, tuner_geo):
     """Tilted-headstock tuner geometry: offset plane face_drop below the top,
     a hinge line break_offset behind the nut datum, an angled plane hinged on
     it, and the tuner sketch drawn ON that plane in true face coordinates.
 
-    Every plane direction is verified with a probe point (mapped through the
-    candidate plane's sketch) instead of trusting offset/angle sign
-    conventions — on failure this raises FretSlotsError rather than drawing a
-    silently-flipped reference. Returns (tuner_sketch, angled_plane,
-    hinge_sketch, offset_plane); offset_plane is None when face_drop is 0.
+    All points live in the fretboard component's canonical frame (fret 0 at
+    the origin, neck along +x, up +z). Every plane direction is verified
+    with a probe point (mapped through a sketch on the candidate plane)
+    instead of trusting offset/angle sign conventions — on failure this
+    raises FretSlotsError rather than drawing a silently-flipped reference.
+    Returns (tuner_sketch, angled_plane, hinge_sketch, offset_plane);
+    offset_plane is None when face_drop is 0.
     """
-    top_face = adsk.fusion.BRepFace.cast(params.top_entity)
-    if not top_face:
-        raise FretSlotsError('A tilted headstock plane requires selecting the '
-                             'flat fretboard top FACE.')
-    context = top_face.assemblyContext
-    native_top = top_face.nativeObject if context else top_face
-    component = native_top.body.parentComponent
-    up = _top_outward_normal(top_face)
     theta = params.headstock_angle
     planes = component.constructionPlanes
 
@@ -1215,42 +1054,28 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
                 pass
         raise FretSlotsError(message)
 
-    def sketch_mapper(sketch):
-        if context:
-            try:
-                return sketch.createForAssemblyContext(context)
-            except Exception:
-                return sketch
-        return sketch
+    # Hinge center: on the center line, break_offset behind fret 0, dropped
+    # face_drop below the board top.
+    hinge_center = adsk.core.Point3D.create(-params.break_offset, 0.0,
+                                            -params.face_drop)
 
-    # Hinge center: on the center line, break_offset behind the (shifted)
-    # nut datum, dropped face_drop below the top. Root space throughout.
-    hinge_center = mapping_sketch.sketchToModelSpace(
-        _place_point((-params.break_offset, 0.0), frame))
-    drop = up.copy()
-    drop.scaleBy(-params.face_drop)
-    hinge_center.translateBy(drop)
-
-    # --- base for the hinge line: offset plane, or the top itself at drop 0.
+    # --- base for the hinge line: offset plane, or the top plane at drop 0.
     offset_plane = None
     hinge_sketch = None
-    hinge_map = None
     if params.face_drop > 1e-9:
         for sign in (-1.0, 1.0):
             try:
                 plane_input = planes.createInput()
                 plane_input.setByOffset(
-                    native_top,
+                    component.xYConstructionPlane,
                     adsk.core.ValueInput.createByReal(params.face_drop * sign))
                 candidate = planes.add(plane_input)
             except Exception:
                 continue
             probe_sketch = component.sketches.add(candidate)
-            probe_map = sketch_mapper(probe_sketch)
-            if abs(probe_map.modelToSketchSpace(hinge_center.copy()).z) < 1e-3:
+            if abs(probe_sketch.modelToSketchSpace(hinge_center.copy()).z) < 1e-3:
                 offset_plane = candidate
                 hinge_sketch = probe_sketch
-                hinge_map = probe_map
                 created.extend([candidate, probe_sketch])
                 break
             try:
@@ -1260,17 +1085,20 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
                 pass
         if offset_plane is None:
             cleanup_and_raise('Could not place the headstock face plane '
-                              'below the fretboard top — reselect the top '
-                              'face and try again.')
+                              'below the board top.')
     else:
-        hinge_sketch, hinge_map = _create_sketch(params.top_entity)
+        hinge_sketch = _create_sketch(component)
         created.append(hinge_sketch)
 
     try:
-        hinge_frame = _sketch_frame(hinge_map, fret_zero, direction)
+        def hinge_point(y):
+            mapped = hinge_sketch.modelToSketchSpace(
+                adsk.core.Point3D.create(-params.break_offset, y,
+                                         -params.face_drop))
+            return adsk.core.Point3D.create(mapped.x, mapped.y, 0.0)
+
         hinge_line = hinge_sketch.sketchCurves.sketchLines.addByTwoPoints(
-            _place_point((-params.break_offset, -params.half_span), hinge_frame),
-            _place_point((-params.break_offset, params.half_span), hinge_frame))
+            hinge_point(-params.half_span), hinge_point(params.half_span))
         hinge_line.isConstruction = True
         hinge_sketch.name = 'Headstock Hinge'
     except Exception:
@@ -1279,32 +1107,15 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
 
     # --- angled plane hinged on that line, verified against a probe point
     # 2 cm down the face (headward and below the hinge by sin(theta)).
-    # The center line may legitimately run up to 15 deg out of the fretboard
-    # plane (validate_and_compute allows it; _sketch_frame projects it), so
-    # the probe must use the PROJECTED heading — the hinge line was built
-    # from the projected frame, and a raw out-of-plane direction would miss
-    # every candidate plane and abort the build.
-    heading = direction.copy()
-    tilt = up.copy()
-    tilt.scaleBy(direction.dotProduct(up))
-    heading.subtract(tilt)
-    if heading.length < 1e-9:
-        cleanup_and_raise('The center line is perpendicular to the fretboard '
-                          'top — cannot orient the headstock plane.')
-    heading.normalize()
-    face_probe = hinge_center.copy()
-    step = heading.copy()
-    step.scaleBy(-math.cos(theta) * 2.0)
-    face_probe.translateBy(step)
-    step = up.copy()
-    step.scaleBy(-math.sin(theta) * 2.0)
-    face_probe.translateBy(step)
+    face_probe = adsk.core.Point3D.create(
+        -params.break_offset - math.cos(theta) * 2.0,
+        0.0,
+        -params.face_drop - math.sin(theta) * 2.0)
 
     angled_plane = None
     tuner_sketch = None
-    tuner_map = None
-    reference_planes = ([native_top, offset_plane] if offset_plane
-                        else [native_top])
+    reference_planes = ([component.xYConstructionPlane, offset_plane]
+                        if offset_plane else [component.xYConstructionPlane])
     for reference in reference_planes:
         for sign in (1.0, -1.0):
             try:
@@ -1317,11 +1128,9 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
             except Exception:
                 continue
             probe_sketch = component.sketches.add(candidate)
-            probe_map = sketch_mapper(probe_sketch)
-            if abs(probe_map.modelToSketchSpace(face_probe.copy()).z) < 1e-3:
+            if abs(probe_sketch.modelToSketchSpace(face_probe.copy()).z) < 1e-3:
                 angled_plane = candidate
                 tuner_sketch = probe_sketch
-                tuner_map = probe_map
                 created.extend([candidate, probe_sketch])
                 break
             try:
@@ -1333,22 +1142,20 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
             break
     if angled_plane is None:
         cleanup_and_raise('Could not tilt the headstock plane about the hinge '
-                          'line — see DEV_NOTES.md (setByAngle assumptions) '
-                          'and check the top face selection.')
+                          'line — see DEV_NOTES.md (setByAngle assumptions).')
 
     # --- face frame inside the tuner sketch: origin at the hinge center,
     # x down the face (headward), y lateral toward the bass side. Both axes
     # are measured from mapped probe points, not assumed.
     try:
-        # The lateral probe must sit ON the hinge plane (drop it like the
+        # The lateral probe must sit ON the hinge plane (dropped like the
         # hinge center) — projecting a top-plane point onto the tilted face
         # would smear face_drop*sin(theta) into the longitudinal axis.
-        lateral_probe = mapping_sketch.sketchToModelSpace(
-            _place_point((-params.break_offset, 1.0), frame))
-        lateral_probe.translateBy(drop)
-        origin2 = tuner_map.modelToSketchSpace(hinge_center.copy())
-        fx2 = tuner_map.modelToSketchSpace(face_probe.copy())
-        fy2 = tuner_map.modelToSketchSpace(lateral_probe)
+        lateral_probe = adsk.core.Point3D.create(-params.break_offset, 1.0,
+                                                 -params.face_drop)
+        origin2 = tuner_sketch.modelToSketchSpace(hinge_center.copy())
+        fx2 = tuner_sketch.modelToSketchSpace(face_probe.copy())
+        fy2 = tuner_sketch.modelToSketchSpace(lateral_probe)
         ex = ((fx2.x - origin2.x) / 2.0, (fx2.y - origin2.y) / 2.0)
         ey = (fy2.x - origin2.x, fy2.y - origin2.y)
 
@@ -1384,36 +1191,31 @@ def _apply_tuner_plane(params, mapping_sketch, frame, direction, fret_zero,
 
 
 def build_slots(params):
-    """Create or rebuild the whole layout.
+    """Create or rebuild the whole fretboard.
+
+    A new layout creates a fresh component under the active component, at
+    its origin: fret 0 at the origin, the neck along +x, the board top on
+    the XY plane. The tapered outline is extruded into the board body, and
+    the slots/nut/radius are cut into it.
 
     In edit mode (params.edit_sketch set) the slot sketch's curves are
     replaced in place — keeping the sketch object alive so downstream features
-    (e.g. a manual Press Pull cut) can recompute — and every object the add-in
-    created for the layout (cut, radius, string/taper sketches) is recreated.
+    (e.g. a manual Press Pull cut) can recompute — and every other object the
+    add-in created for the layout (board body, cuts, radius, string/taper
+    sketches, tuner chain) is recreated inside the same component.
     Raises FretSlotsError on geometric problems.
     """
     app = adsk.core.Application.get()
     design = adsk.fusion.Design.cast(app.activeProduct)
 
-    centerline = _line_geometry(params.center_line)
-    center_direction = _unit_direction(centerline) if centerline else None
-    if not center_direction:
-        raise FretSlotsError('Could not read the center line geometry.')
-
-    fret_zero = _fret_zero_point(params.fret_zero_ref, centerline, center_direction)
-    direction = _neck_direction(centerline, fret_zero, params.flip)
-
-    # The nut offset pushes fret 0 — and with it the WHOLE layout (frets,
-    # nut slot, strings, taper, bridge, radius) — along the neck away from
-    # the selected reference, e.g. when the nut sits in a slot inside the
-    # fretboard rather than against its end.
-    if params.nut_slot_offset:
-        shift = direction.copy()
-        shift.scaleBy(params.nut_slot_offset)
-        fret_zero.translateBy(shift)
+    # The canonical layout frame in the fretboard component's own space.
+    fret_zero = adsk.core.Point3D.create(0.0, 0.0, 0.0)
+    direction = adsk.core.Vector3D.create(1.0, 0.0, 0.0)
 
     created_new = params.edit_sketch is None
+    occurrence = None
     extra_sketches = []
+    board_feature = None
     radius_feature = None
     radius_sketches = []
     radius_planes = []
@@ -1422,43 +1224,57 @@ def build_slots(params):
     tuner_planes = []    # [angled plane, offset plane] — cleanup order
     cut_feature = None
     nut_cut_feature = None
-    taper_cut_feature = None
     try:
         timeline_start = design.timeline.markerPosition
     except Exception:
         timeline_start = None
     if created_new:
-        sketch, mapping_sketch = _create_sketch(params.top_entity)
+        try:
+            occurrence = design.activeComponent.occurrences.addNewComponent(
+                adsk.core.Matrix3D.create())
+            component = occurrence.component
+        except Exception:
+            raise FretSlotsError('Could not create the fretboard component:\n'
+                                 '{}'.format(
+                                     traceback.format_exc().splitlines()[-1]))
+        sketch = _create_sketch(component)
     else:
         sketch = params.edit_sketch
-        mapping_sketch = _sketch_instances(design, sketch)[0]
+        component = sketch.parentComponent
         old_metadata = _sketch_metadata(sketch)
         # Remove everything the previous run created before touching the
         # curves those features consume; all of it is recreated below.
         _delete_tracked(design, old_metadata)
-        if params.top_entity is None:
-            # The old radius cut consumed the flat top face; deleting that cut
-            # just restored it — pick it back up from the stored token.
-            params.top_entity = _restore_top_entity(design, old_metadata)
         _clear_sketch_curves(sketch)
 
     try:
-        frame = _sketch_frame(mapping_sketch, fret_zero, direction)
-
-        # Capture the board body and selection tokens BEFORE any feature is
-        # created: the radius loft consumes the flat top face, after which
-        # neither its token nor its body can be resolved from the stale proxy.
-        board = _board_body(params.top_entity)
-        selection_tokens = {
-            'fret_zero_token': _entity_token(params.fret_zero_ref),
-            'top_token': _entity_token(params.top_entity),
-            'center_line_token': _entity_token(params.center_line),
-        }
+        frame = _sketch_frame(sketch, fret_zero, direction)
 
         layout = fret_math.slot_layout(
             params.bass_scale, params.treble_scale, params.fret_count,
             params.perpendicular_fret, params.half_span, params.slot_width,
             params.nut_slot_width)
+
+        # The board body first: outline sketch -> extrude. Everything else
+        # cuts into (or references) it.
+        try:
+            corners = fret_math.taper_outline(
+                layout['fret_zero'], layout['bridge'], layout['last'],
+                params.string_spread_nut, params.string_spread_bridge,
+                params.nut_width, params.board_overhang,
+                setback=params.board_setback)
+        except ValueError as error:
+            raise FretSlotsError(str(error))
+        taper_sketch = _draw_polyline_sketch(
+            component, fret_zero, direction, 'Fretboard Outline', corners,
+            close_loop=True)
+        extra_sketches.append(taper_sketch)
+        board_feature = _extrude_board(taper_sketch, params.board_thickness)
+        board = board_feature.bodies.item(0)
+        try:
+            board.name = 'Fretboard'
+        except Exception:
+            pass
 
         sketch.isComputeDeferred = True
         try:
@@ -1480,7 +1296,7 @@ def build_slots(params):
         bridge_sketch = None
         if params.mark_bridge:
             bridge_sketch = _draw_polyline_sketch(
-                params, fret_zero, direction, 'Bridge Mark',
+                component, fret_zero, direction, 'Bridge Mark',
                 [layout['bridge']], construction=True)
             extra_sketches.append(bridge_sketch)
 
@@ -1504,7 +1320,7 @@ def build_slots(params):
                 params.string_spread_nut, params.string_spread_bridge,
                 head_lengths)
             strings_sketch = _draw_polyline_sketch(
-                params, fret_zero, direction,
+                component, fret_zero, direction,
                 'String Layout ({} strings)'.format(params.string_count),
                 strings)
             extra_sketches.append(strings_sketch)
@@ -1512,41 +1328,20 @@ def build_slots(params):
         if tuner_geo:
             if tuner_geo['tilted']:
                 (tuner_sketch, angled_plane, hinge_sketch,
-                 offset_plane) = _apply_tuner_plane(
-                    params, mapping_sketch, frame, direction, fret_zero,
-                    tuner_geo)
+                 offset_plane) = _apply_tuner_plane(params, component,
+                                                    tuner_geo)
                 tuner_tooling.append(hinge_sketch)
                 tuner_planes.append(angled_plane)
                 if offset_plane:
                     tuner_planes.append(offset_plane)
             else:
                 tuner_sketch = _draw_tuner_plan_sketch(
-                    params, fret_zero, direction, tuner_geo)
+                    component, params, fret_zero, direction, tuner_geo)
             extra_sketches.append(tuner_sketch)
-
-        taper_sketch = None
-        if params.draw_taper:
-            try:
-                corners = fret_math.taper_outline(
-                    layout['fret_zero'], layout['bridge'], layout['last'],
-                    params.string_spread_nut, params.string_spread_bridge,
-                    params.nut_width, params.board_overhang)
-            except ValueError as error:
-                raise FretSlotsError(str(error))
-            taper_sketch = _draw_polyline_sketch(
-                params, fret_zero, direction, 'Fretboard Outline', corners,
-                close_loop=True)
-            extra_sketches.append(taper_sketch)
 
         if params.radius_mode:
             radius_feature, radius_sketches, radius_planes = _apply_radius(
-                params, sketch, mapping_sketch, frame, direction, layout)
-
-        # The outline cut trims the top face, invalidating face references —
-        # so it must run AFTER the radius (which needs the pristine face) and
-        # rely only on the taper profile and the board body from here on.
-        if params.cut_taper and taper_sketch:
-            taper_cut_feature = _intersect_board_with_outline(taper_sketch, board)
+                params, component, layout, board)
 
         if params.cut_depth:
             all_profiles = adsk.core.ObjectCollection.create()
@@ -1575,22 +1370,29 @@ def build_slots(params):
                                             params.cut_depth, board, 'slots')
 
         # Lock every created curve so the sketches are fully defined, then
-        # tidy the browser: only the working references (string layout and
-        # bridge mark) stay visible. Sketches whose geometry now exists as
-        # solid (cut slots / cut board) are hidden — but without a cut the
-        # slot sketch stays visible, or there would be nothing to see.
+        # tidy the browser: only the working references (string layout,
+        # bridge mark, tuner layout) stay visible. The outline sketch became
+        # the board body and the tooling exists as solid geometry — but
+        # without a slot cut the slot sketch stays visible, or there would
+        # be nothing to see of the layout. The slot sketch's visibility is
+        # set BOTH ways: an edit may have inherited a hidden sketch from a
+        # previous run whose cut is now unchecked.
         for created_sketch in ([sketch] + extra_sketches + radius_sketches
                                + tuner_tooling):
             _fix_all_curves(created_sketch)
         to_hide = (list(radius_sketches) + list(radius_planes)
-                   + list(tuner_tooling) + list(tuner_planes))
+                   + list(tuner_tooling) + list(tuner_planes)
+                   + [taper_sketch])
         if cut_feature:
             to_hide.append(sketch)
-        if taper_cut_feature and taper_sketch:
-            to_hide.append(taper_sketch)
         for visible_object in to_hide:
             try:
                 visible_object.isLightBulbOn = False
+            except Exception:
+                pass
+        if not cut_feature:
+            try:
+                sketch.isLightBulbOn = True
             except Exception:
                 pass
 
@@ -1619,7 +1421,7 @@ def build_slots(params):
                                          if len(tuner_planes) > 1 else ''),
         }
         metadata = json.dumps({
-            'version': 6,
+            'version': 7,
             **tuner_metadata,
             'scale_cm': (params.bass_scale + params.treble_scale) / 2.0,
             'bass_scale_cm': params.bass_scale,
@@ -1630,28 +1432,22 @@ def build_slots(params):
             'slot_width_cm': params.slot_width,
             'slot_length_cm': params.half_span * 2.0,
             'nut_slot_width_cm': params.nut_slot_width,
-            'nut_slot_offset_cm': params.nut_slot_offset,
             'nut_slot_depth_cm': params.nut_slot_depth,
+            'board_thickness_cm': params.board_thickness,
+            'board_setback_cm': params.board_setback,
             'cut_depth_cm': params.cut_depth,
             'mark_bridge': params.mark_bridge,
-            'flip': params.flip,
             'draw_strings': params.draw_strings,
             'string_count': params.string_count,
             'string_spread_nut_cm': params.string_spread_nut,
             'string_spread_bridge_cm': params.string_spread_bridge,
             'headstock_length_cm': params.headstock_length,
-            'draw_taper': params.draw_taper,
             'nut_width_cm': params.nut_width,
             'board_overhang_cm': params.board_overhang,
-            'cut_taper': params.cut_taper,
-            'taper_cut_token': (_entity_token(taper_cut_feature)
-                                if taper_cut_feature else ''),
             'radius_mode': params.radius_mode,
             'radius_start_cm': params.radius_start,
             'radius_end_cm': params.radius_end,
-            'fret_zero_token': selection_tokens['fret_zero_token'],
-            'top_token': selection_tokens['top_token'],
-            'center_line_token': selection_tokens['center_line_token'],
+            'board_token': _entity_token(board_feature),
             'cut_token': _entity_token(cut_feature) if cut_feature else '',
             'nut_cut_token': _entity_token(nut_cut_feature) if nut_cut_feature else '',
             'bridge_token': _entity_token(bridge_sketch) if bridge_sketch else '',
@@ -1662,6 +1458,12 @@ def build_slots(params):
             'radius_plane_tokens': [_entity_token(p) for p in radius_planes],
         })
         sketch.attributes.add(ATTRIBUTE_GROUP, ATTRIBUTE_NAME, metadata)
+
+        if created_new:
+            try:
+                component.name = _sketch_name(params, 'Fretboard')
+            except Exception:
+                pass  # e.g. a name collision — the default name stays
 
         # Wrap everything this run created in one timeline group (new layouts
         # only — edited features are appended at the end of the timeline,
@@ -1676,27 +1478,34 @@ def build_slots(params):
             except Exception:
                 pass
     except Exception:
-        # Never leave half-built geometry behind: remove everything this run
-        # created, in feature-before-consumed-object order. An edited slot
-        # sketch is the user's existing object — leave it for undo instead of
-        # deleting it.
-        # Tuner chain in consumed-last order: the tuner sketch (already in
-        # extra_sketches) before the angled plane, then the hinge sketch,
-        # then the offset plane — mirroring _delete_tracked.
-        cleanup = ([nut_cut_feature, cut_feature, taper_cut_feature,
-                    radius_feature]
-                   + radius_sketches + radius_planes + extra_sketches
-                   + tuner_planes[:1] + tuner_tooling + tuner_planes[1:])
+        # Never leave half-built geometry behind. A new layout lives entirely
+        # in the component this run created — removing its occurrence removes
+        # everything with it. On edit, remove the recreated pieces in
+        # feature-before-consumed-object order (the board extrude before the
+        # outline sketch it consumes, the tuner sketch — inside
+        # extra_sketches — before the angled plane, then the hinge sketch,
+        # then the offset plane, mirroring _delete_tracked); the edited slot
+        # sketch is the user's existing object — leave it for undo instead
+        # of deleting it.
         if created_new:
-            cleanup.append(sketch)
-        for obj in cleanup:
-            if obj is None:
-                continue
             try:
-                if obj.isValid:
-                    obj.deleteMe()
+                if occurrence and occurrence.isValid:
+                    occurrence.deleteMe()
             except Exception:
                 pass
+        else:
+            cleanup = ([nut_cut_feature, cut_feature, radius_feature]
+                       + radius_sketches + radius_planes + [board_feature]
+                       + extra_sketches
+                       + tuner_planes[:1] + tuner_tooling + tuner_planes[1:])
+            for obj in cleanup:
+                if obj is None:
+                    continue
+                try:
+                    if obj.isValid:
+                        obj.deleteMe()
+                except Exception:
+                    pass
         raise
     return sketch
 
@@ -1705,38 +1514,107 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
     def __init__(self, cmd_def, debug):
         super().__init__(cmd_def, debug)
         self._preview_ok = False
-        self._radius_rejected = False
         self._edit_sketches = []
-
-    @staticmethod
-    def _focus_next(inputs, input_id):
-        """Activate the next selection input so the user can keep picking in
-        the canvas without clicking the dialog. Skipped when it already has a
-        selection (e.g. restored by edit-mode prefill)."""
-        next_input = inputs.itemById(input_id)
-        if next_input and next_input.selectionCount == 0:
-            try:
-                next_input.hasFocus = True
-            except Exception:
-                pass
+        # Values of the last run, as loaded when the dialog opened; kept so
+        # switching the Start-from dropdown back to "last used" can restore
+        # them after a defaults reset or an edit prefill.
+        self._settings = dict(DEFAULTS)
 
     def _edit_sketch_from_inputs(self, inputs):
         dropdown = inputs.itemById('edit_target')
         if not dropdown:
             return None
         item = dropdown.selectedItem
-        if not item or item.index <= 0:
+        if not item or item.index < len(NEW_LAYOUT_LABELS):
             return None
-        index = item.index - 1
+        index = item.index - len(NEW_LAYOUT_LABELS)
         if index >= len(self._edit_sketches):
             return None
         sketch = self._edit_sketches[index]
         return sketch if sketch and sketch.isValid else None
 
+    def _new_layout_settings(self, inputs):
+        """Which values a new fretboard starts from: defaults or last used."""
+        dropdown = inputs.itemById('edit_target')
+        item = dropdown.selectedItem if dropdown else None
+        if item and item.name == CREATE_DEFAULT_LABEL:
+            return DEFAULTS
+        return self._settings
+
+    def _apply_settings(self, inputs, settings):
+        """Refill the whole dialog from a settings dict.
+
+        Used when the Start-from dropdown switches between the defaults and
+        the last-used values (on_create builds the inputs from the same dict
+        instead — the inputs do not exist yet at that point).
+        """
+        for key, input_id in EXPRESSION_INPUTS:
+            command_input = inputs.itemById(input_id)
+            if not command_input:
+                continue
+            # A stored expression can be invalid in this document (it may have
+            # referenced a user parameter of another design); fall back to the
+            # default rather than leaving the field red.
+            for expression in (settings.get(key), DEFAULTS[key]):
+                if not isinstance(expression, str):
+                    continue
+                try:
+                    command_input.expression = expression
+                    if command_input.isValidExpression:
+                        break
+                except Exception:
+                    pass
+
+        for key, input_id, low, high in SPINNER_INPUTS:
+            spinner = inputs.itemById(input_id)
+            stored = settings.get(key, DEFAULTS[key])
+            if spinner and isinstance(stored, int) and low <= stored <= high:
+                try:
+                    spinner.value = stored
+                except Exception:
+                    pass
+
+        for key, input_id in CHECKBOX_INPUTS:
+            checkbox = inputs.itemById(input_id)
+            if checkbox:
+                checkbox.value = bool(settings.get(key, DEFAULTS[key]))
+
+        for key, input_id in DROPDOWN_INPUTS:
+            dropdown = inputs.itemById(input_id)
+            if not dropdown:
+                continue
+            name = settings.get(key, DEFAULTS[key])
+            # Only select the target item — clearing first would leave the
+            # dropdown transiently empty and break the template's get_inputs.
+            for i in range(dropdown.listItems.count):
+                item = dropdown.listItems.item(i)
+                if item.name == name:
+                    item.isSelected = True
+                    break
+
+        self._apply_group_state(inputs, settings)
+        self._apply_nut_cut_visibility(inputs,
+                                       bool(settings.get('create_nut_slot')),
+                                       bool(settings.get('cut_slots')))
+        self._apply_multiscale_visibility(inputs, bool(settings.get('multiscale')))
+        self._apply_radius_visibility(inputs, settings.get('radius_mode'))
+        self._apply_tuner_visibility(inputs)
+
+    @staticmethod
+    def _apply_group_state(inputs, settings):
+        for group_id, key in GROUP_EXPANDERS:
+            group = inputs.itemById(group_id)
+            if not group:
+                continue
+            expanded = (settings.get(key) != 'No radius' if key == 'radius_mode'
+                        else bool(settings.get(key)))
+            try:
+                group.isExpanded = expanded
+            except Exception:
+                pass
+
     def _prefill_from_sketch(self, inputs, sketch):
-        """Load stored parameters and selections of an existing fret sketch."""
-        app = adsk.core.Application.get()
-        design = adsk.fusion.Design.cast(app.activeProduct)
+        """Load stored parameters of an existing fret layout sketch."""
         metadata = _sketch_metadata(sketch)
 
         def set_value(input_id, key):
@@ -1782,11 +1660,13 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             set_value('nut_slot_width', 'nut_slot_width_cm')
             set_value('nut_slot_depth', 'nut_slot_depth_cm')
 
-        offset_input = inputs.itemById('nut_slot_offset')
-        stored_offset = metadata.get('nut_slot_offset_cm')
-        if offset_input and isinstance(stored_offset, (int, float)):
+        set_value('board_thickness', 'board_thickness_cm')
+        # Zero is a legitimate setback, so this skips set_value's "> 0" guard.
+        setback_input = inputs.itemById('board_setback')
+        stored_setback = metadata.get('board_setback_cm')
+        if setback_input and isinstance(stored_setback, (int, float)):
             try:
-                offset_input.value = float(stored_offset)
+                setback_input.value = float(stored_setback)
             except Exception:
                 pass
 
@@ -1800,16 +1680,13 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         self._apply_nut_cut_visibility(inputs, has_nut, has_cut)
 
         set_check('mark_bridge', 'mark_bridge')
-        set_check('flip_direction', 'flip')
         set_check('draw_strings', 'draw_strings')
         set_spinner('string_count', 'string_count', 1, 12)
         set_value('string_spread_nut', 'string_spread_nut_cm')
         set_value('string_spread_bridge', 'string_spread_bridge_cm')
         set_value('headstock_length', 'headstock_length_cm')
-        set_check('draw_taper', 'draw_taper')
         set_value('nut_width', 'nut_width_cm')
         set_value('board_overhang', 'board_overhang_cm')
-        set_check('cut_taper', 'cut_taper')
 
         def select_dropdown_item(input_id, name):
             dropdown = inputs.itemById(input_id)
@@ -1831,7 +1708,7 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         set_spinner('tuner_bass_count', 'tuner_bass_count', 0, 12)
         set_check('tuner_reversed', 'tuner_reversed')
         # Zero (and for offsets, zero-adjacent) values are legitimate here, so
-        # these skip set_value's "> 0" guard — same pattern as nut_slot_offset.
+        # these skip set_value's "> 0" guard — same pattern as board_setback.
         for input_id, key in (('headstock_angle', 'headstock_angle_rad'),
                               ('face_drop', 'face_drop_cm'),
                               ('break_offset', 'break_offset_cm'),
@@ -1879,29 +1756,8 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         set_value('radius_end', 'radius_end_cm')
         self._apply_radius_visibility(inputs, mode_name)
 
-        for input_id, key in (('fret_zero_ref', 'fret_zero_token'),
-                              ('top_plane', 'top_token'),
-                              ('center_line', 'center_line_token')):
-            selection_input = inputs.itemById(input_id)
-            if not selection_input:
-                continue
-            selection_input.clearSelection()
-            token = metadata.get(key) or ''
-            if not token or not design:
-                continue
-            try:
-                found = design.findEntityByToken(token)
-                if found:
-                    selection_input.addSelection(found[0])
-            except Exception:
-                pass
-
-        self._radius_rejected = False
-
     @staticmethod
     def _apply_nut_cut_visibility(inputs, nut_on, cut_on):
-        # The nut offset stays visible always: it moves the whole layout,
-        # not just the nut slot.
         for input_id, visible in (('nut_slot_width', nut_on),
                                   ('nut_slot_depth', nut_on and cut_on),
                                   ('slot_depth', cut_on)):
@@ -1965,7 +1821,6 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
 
     def on_create(self, command, inputs):
         self._preview_ok = False
-        self._radius_rejected = False
         self._edit_sketches = []
 
         app = adsk.core.Application.get()
@@ -1981,56 +1836,24 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             pass
 
         settings = load_settings()
+        self._settings = settings
         units = design.unitsManager.defaultLengthUnits
 
         self._edit_sketches = _find_fret_sketches(design)
         edit_dropdown = inputs.addDropDownCommandInput(
-            'edit_target', 'Edit',
+            'edit_target', 'Start from',
             adsk.core.DropDownStyles.TextListDropDownStyle)
-        edit_dropdown.listItems.add(CREATE_NEW_LABEL, True, '')
+        for index, label in enumerate(NEW_LAYOUT_LABELS):
+            edit_dropdown.listItems.add(label, index == 0, '')
         for sketch in self._edit_sketches:
             edit_dropdown.listItems.add(sketch.name, False, '')
-        if not self._edit_sketches:
-            edit_dropdown.isVisible = False
-
-        # The command prompt (3rd argument) is what Fusion shows in the tooltip
-        # beside the cursor while the input is active — keep it short and
-        # actionable; the longer explanation goes into the hover tooltip.
-        ref_sel = inputs.addSelectionInput(
-            'fret_zero_ref', 'Fret zero (nut)',
-            '1/3  Select fret zero: the nut face, the fretboard end face, or '
-            'a sketch line at the nut position')
-        ref_sel.tooltip = (
-            'Where fret 0 sits. Pick one: the nut face that looks toward the '
-            'neck, the end face of the fretboard where the nut will go, or a '
-            'sketch line drawn across the neck at the nut position.')
-        ref_sel.addSelectionFilter('PlanarFaces')
-        ref_sel.addSelectionFilter('SketchLines')
-        ref_sel.setSelectionLimits(1, 1)
-
-        top_sel = inputs.addSelectionInput(
-            'top_plane', 'Fretboard top',
-            '2/3  Select the fretboard top face (or a tangent plane for a '
-            'radiused board)')
-        top_sel.tooltip = (
-            'Top face of the fretboard, or a tangent construction plane for a '
-            'radiused board. The sketches are created on it.')
-        top_sel.addSelectionFilter('Faces')
-        top_sel.addSelectionFilter('ConstructionPlanes')
-        top_sel.setSelectionLimits(1, 1)
-
-        line_sel = inputs.addSelectionInput(
-            'center_line', 'Center line',
-            '3/3  Select the center line running along the neck')
-        line_sel.tooltip = (
-            'Sketch line or linear edge running along the middle of the neck. '
-            'Frets march from fret 0 toward its far end.')
-        line_sel.addSelectionFilter('SketchLines')
-        line_sel.addSelectionFilter('LinearEdges')
-        line_sel.setSelectionLimits(1, 1)
-
-        inputs.addBoolValueInput('flip_direction', 'Flip direction', True, '',
-                                 bool(settings['flip_direction']))
+        edit_dropdown.tooltip = (
+            'Which values this dialog starts with. "Last used values" repeats '
+            'your previous run; "Default values" resets every field to the '
+            'add-in defaults for a fresh design. Picking an existing layout '
+            'of this document loads its parameters back and rebuilds it in '
+            'place on OK — switch back to a New entry to build another '
+            'fretboard instead.')
 
         def value_input(container, input_id, label, expr_key):
             # A stored expression can be invalid in this document (e.g. it
@@ -2057,16 +1880,6 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         inputs.addBoolValueInput('create_nut_slot', 'Create nut slot', True, '',
                                  nut_on)
         value_input(inputs, 'nut_slot_width', 'Nut slot width', 'nut_slot_width_expr')
-        value_input(inputs, 'nut_slot_offset', 'Nut offset', 'nut_slot_offset_expr')
-        offset_input = inputs.itemById('nut_slot_offset')
-        if offset_input:
-            offset_input.tooltip = (
-                'Shift fret 0 — and the WHOLE layout with it (frets, nut '
-                'slot, strings, outline, bridge) — along the neck, away from '
-                'the selected fret-zero reference. Positive pushes it into '
-                'the board, e.g. when the nut sits in a slot inside the '
-                'fretboard instead of against its end. 0 keeps fret 0 '
-                'exactly on the reference.')
         value_input(inputs, 'nut_slot_depth', 'Nut slot depth', 'nut_slot_depth_expr')
         nut_depth_input = inputs.itemById('nut_slot_depth')
         if nut_depth_input:
@@ -2086,6 +1899,30 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             'length from fret 0 — the theoretical saddle contact point. '
             'It is a reference only: it is never selected or cut.')
 
+        board_group = inputs.addGroupCommandInput('grp_board', 'Fretboard body')
+        board_group.isExpanded = True
+        bg = board_group.children
+        value_input(bg, 'board_thickness', 'Board thickness',
+                    'board_thickness_expr')
+        thickness_input = inputs.itemById('board_thickness')
+        if thickness_input:
+            thickness_input.tooltip = (
+                'Thickness of the created board body. The top face sits on '
+                'the XY plane; slot and radius depths are measured down '
+                'from it.')
+        value_input(bg, 'board_setback', 'Board start behind nut',
+                    'board_setback_expr')
+        setback_input = inputs.itemById('board_setback')
+        if setback_input:
+            setback_input.tooltip = (
+                'How far the board front edge extends behind fret 0 (toward '
+                'the headstock). 0 starts the board exactly at fret 0 (the '
+                'nut sits against its end face); set it to at least the nut '
+                'slot width when the nut sits in a slot inside the board.')
+        value_input(bg, 'nut_width', 'Nut width', 'nut_width_expr')
+        value_input(bg, 'board_overhang', 'Board end past last fret',
+                    'board_overhang_expr')
+
         multiscale_group = inputs.addGroupCommandInput(
             'grp_multiscale', 'Multi-scale (fanned frets)')
         multiscale_group.isExpanded = bool(settings['multiscale'])
@@ -2100,8 +1937,8 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         self._apply_multiscale_visibility(inputs, bool(settings['multiscale']))
 
         strings_group = inputs.addGroupCommandInput(
-            'grp_strings', 'Strings and board outline')
-        strings_group.isExpanded = bool(settings['draw_strings'] or settings['draw_taper'])
+            'grp_strings', 'String layout')
+        strings_group.isExpanded = bool(settings['draw_strings'])
         sg = strings_group.children
         sg.addBoolValueInput('draw_strings', 'Draw string lines', True, '',
                              bool(settings['draw_strings']))
@@ -2114,18 +1951,6 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
                     'string_spread_bridge_expr')
         value_input(sg, 'headstock_length', 'Headstock line length',
                     'headstock_length_expr')
-        sg.addBoolValueInput('draw_taper', 'Draw fretboard outline', True, '',
-                             bool(settings['draw_taper']))
-        value_input(sg, 'nut_width', 'Nut width', 'nut_width_expr')
-        value_input(sg, 'board_overhang', 'Board end past last fret',
-                    'board_overhang_expr')
-        cut_taper_checkbox = sg.addBoolValueInput(
-            'cut_taper', 'Cut board to outline', True, '',
-            bool(settings['cut_taper']))
-        cut_taper_checkbox.tooltip = (
-            'Trim the board body to the drawn outline (an Intersect extrude '
-            'through the whole board) — the blank takes the tapered shape in '
-            'the same operation.')
 
         radius_group = inputs.addGroupCommandInput('grp_radius', 'Fretboard radius')
         radius_group.isExpanded = settings['radius_mode'] != 'No radius'
@@ -2290,7 +2115,8 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
 
         inputs.addTextBoxCommandInput(
             'info_box', 'Info',
-            'Select the fret zero reference, fretboard top, and center line.',
+            'Set the parameters — OK creates the fretboard as a new '
+            'component (fret 0 at the origin, neck along +X).',
             8, True)
 
     def on_input_changed(self, command_, command_inputs, changed_input, input_values):
@@ -2301,10 +2127,12 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
             sketch = self._edit_sketch_from_inputs(command_inputs)
             if sketch:
                 self._prefill_from_sketch(command_inputs, sketch)
-
-        if changed_input.id == 'fret_zero_ref':
-            if changed_input.selectionCount >= 1:
-                self._focus_next(command_inputs, 'top_plane')
+            else:
+                # A New entry: refill from its source, so "default values"
+                # really is a clean slate and either New entry undoes the
+                # prefill left behind by an edit target.
+                self._apply_settings(command_inputs,
+                                     self._new_layout_settings(command_inputs))
 
         if changed_input.id in ('create_nut_slot', 'cut_slots'):
             nut_checkbox = command_inputs.itemById('create_nut_slot')
@@ -2326,33 +2154,17 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
                                 'tuner_hole_preset'):
             self._apply_tuner_visibility(command_inputs)
 
-        if changed_input.id == 'top_plane':
-            entity = _get_selected(command_inputs, 'top_plane')
-            if entity:
-                if _top_plane_geometry(entity) is None:
-                    changed_input.clearSelection()
-                    self._radius_rejected = True
-                    # Keep the focus here so the user can re-pick right away.
-                    try:
-                        changed_input.hasFocus = True
-                    except Exception:
-                        pass
-                else:
-                    self._radius_rejected = False
-                    self._focus_next(command_inputs, 'center_line')
-
         info = command_inputs.itemById('info_box')
         if info:
             _, message, _ = validate_and_compute(
-                command_inputs, self._radius_rejected,
-                self._edit_sketch_from_inputs(command_inputs))
+                command_inputs, self._edit_sketch_from_inputs(command_inputs))
             if info.text != message:
                 info.text = message
 
     def on_preview(self, command, inputs, args, input_values):
         self._preview_ok = False
         ok, message, params = validate_and_compute(
-            inputs, self._radius_rejected, self._edit_sketch_from_inputs(inputs))
+            inputs, self._edit_sketch_from_inputs(inputs))
         if not ok:
             return
         try:
@@ -2385,16 +2197,16 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         app = adsk.core.Application.get()
         ui = app.userInterface
         ok, message, params = validate_and_compute(
-            inputs, self._radius_rejected, self._edit_sketch_from_inputs(inputs))
+            inputs, self._edit_sketch_from_inputs(inputs))
         if not ok:
-            ui.messageBox('Cannot create fret slots:\n\n{}'.format(message))
+            ui.messageBox('Cannot create the fretboard:\n\n{}'.format(message))
             return
         try:
             build_slots(params)
         except FretSlotsError as error:
-            ui.messageBox('Cannot create fret slots:\n\n{}'.format(error))
+            ui.messageBox('Cannot create the fretboard:\n\n{}'.format(error))
         except Exception:
-            ui.messageBox('Create Fret Slots failed:\n{}'.format(traceback.format_exc()))
+            ui.messageBox('Create Fretboard failed:\n{}'.format(traceback.format_exc()))
 
     def on_destroy(self, command, inputs, reason, input_values):
         if reason != adsk.core.CommandTerminationReason.CompletedTerminationReason:
@@ -2406,65 +2218,25 @@ class CreateFretSlotsCommand(Fusion360CommandBase):
         if not inputs.itemById('info_box'):
             return
 
+        # Reload rather than reuse self._settings: this keeps the keys the
+        # dialog does not own (buttons_promoted) at their stored value.
         settings = load_settings()
-        for key, input_id in (
-            ('scale_length_expr', 'scale_length'),
-            ('slot_width_expr', 'slot_width'),
-            ('slot_length_expr', 'slot_length'),
-            ('nut_slot_width_expr', 'nut_slot_width'),
-            ('nut_slot_offset_expr', 'nut_slot_offset'),
-            ('nut_slot_depth_expr', 'nut_slot_depth'),
-            ('slot_depth_expr', 'slot_depth'),
-            ('string_spread_nut_expr', 'string_spread_nut'),
-            ('string_spread_bridge_expr', 'string_spread_bridge'),
-            ('headstock_length_expr', 'headstock_length'),
-            ('nut_width_expr', 'nut_width'),
-            ('board_overhang_expr', 'board_overhang'),
-            ('bass_scale_expr', 'bass_scale'),
-            ('treble_scale_expr', 'treble_scale'),
-            ('radius_start_expr', 'radius_start'),
-            ('radius_end_expr', 'radius_end'),
-            ('headstock_angle_expr', 'headstock_angle'),
-            ('face_drop_expr', 'face_drop'),
-            ('break_offset_expr', 'break_offset'),
-            ('tuner_first_expr', 'tuner_first'),
-            ('tuner_spacing_expr', 'tuner_spacing'),
-            ('pattern_first_expr', 'pattern_first'),
-            ('pattern_pitch_expr', 'pattern_pitch'),
-            ('pattern_row_offset_expr', 'pattern_row_offset'),
-            ('pattern_row_slant_expr', 'pattern_row_slant'),
-            ('tuner_hole_expr', 'tuner_hole_custom'),
-            ('tuner_clearance_expr', 'tuner_clearance'),
-        ):
+        for key, input_id in EXPRESSION_INPUTS:
             value_input = inputs.itemById(input_id)
             if value_input:
                 settings[key] = value_input.expression
 
-        for key, input_id in (('fret_count', 'fret_count'),
-                              ('string_count', 'string_count'),
-                              ('perpendicular_fret', 'perpendicular_fret'),
-                              ('tuner_bass_count', 'tuner_bass_count')):
+        for key, input_id, _low, _high in SPINNER_INPUTS:
             spinner = inputs.itemById(input_id)
             if spinner:
                 settings[key] = int(spinner.value)
 
-        for key, input_id in (('create_nut_slot', 'create_nut_slot'),
-                              ('cut_slots', 'cut_slots'),
-                              ('mark_bridge', 'mark_bridge'),
-                              ('flip_direction', 'flip_direction'),
-                              ('draw_strings', 'draw_strings'),
-                              ('draw_taper', 'draw_taper'),
-                              ('cut_taper', 'cut_taper'),
-                              ('multiscale', 'multiscale'),
-                              ('place_tuners', 'place_tuners'),
-                              ('tuner_reversed', 'tuner_reversed')):
+        for key, input_id in CHECKBOX_INPUTS:
             checkbox = inputs.itemById(input_id)
             if checkbox:
                 settings[key] = bool(checkbox.value)
 
-        for key, input_id in (('radius_mode', 'radius_mode'),
-                              ('tuner_mode', 'tuner_mode'),
-                              ('tuner_hole_preset', 'tuner_hole_preset')):
+        for key, input_id in DROPDOWN_INPUTS:
             dropdown = inputs.itemById(input_id)
             if dropdown and dropdown.selectedItem:
                 settings[key] = dropdown.selectedItem.name

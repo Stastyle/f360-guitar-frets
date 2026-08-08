@@ -58,9 +58,6 @@ def closest_point_parameter(point1, direction1, point2, direction2):
     """Parameter t so that point1 + t*direction1 is the point on line 1
     closest to line 2. Points/directions are 3-tuples; directions need not be
     unit length. Raises ValueError when the lines are (nearly) parallel.
-
-    Used to drop fret 0 onto the center line when the user marks the nut
-    position with a sketch line instead of a face.
     """
     a = _dot3(direction1, direction1)
     b = _dot3(direction1, direction2)
@@ -82,7 +79,7 @@ def fanned_positions(bass_scale, treble_scale, fret_count, perpendicular_fret):
     Returns (frets, bridge): frets[n] = (x_bass, x_treble) for n = 0..count
     (n = 0 is the nut); bridge is the (x_bass, x_treble) of the saddle line.
     Anchored so the REARMOST end of the (possibly fanned) nut line sits at
-    x = 0: nothing of the layout reaches behind the fret-zero reference, so a
+    x = 0: nothing of the layout reaches behind the fret-0 datum, so a
     fanned nut lands fully on the board and can actually be manufactured.
     The chosen perpendicular fret comes out straight. With
     bass_scale == treble_scale this reduces to the standard layout.
@@ -170,16 +167,36 @@ def slot_layout(bass_scale, treble_scale, fret_count, perpendicular_fret,
 def nut_slot_span(bass_scale, treble_scale, perpendicular_fret,
                   nut_slot_width, nut_offset=0.0):
     """(rearmost x, foremost x) reach of the nut slot, measured from the
-    selected fret-zero reference (nut_offset shifts the whole layout).
+    fret-0 datum (nut_offset shifts the whole span).
 
     Accounts for the fan skew of the nut line in multi-scale layouts, so the
-    user can check that the physical board actually covers the whole seat.
+    caller can check that the board (front edge at -setback) actually covers
+    the whole seat.
     """
     frets, _ = fanned_positions(bass_scale, treble_scale, 0, perpendicular_fret)
     x_bass, x_treble = frets[0]
     front = max(x_bass, x_treble) + nut_offset
     rear = min(x_bass, x_treble) + nut_offset - nut_slot_width
     return rear, front
+
+
+def nut_seat_setback_required(bass_scale, treble_scale, perpendicular_fret,
+                              half_span, nut_slot_width):
+    """Board setback that fully covers the nut seat.
+
+    The board front edge runs parallel to the (possibly fanned) nut line, so
+    seat coverage is measured PERPENDICULAR to that line: a setback of s
+    (an along-neck shift of the front edge) covers s*cos(fan angle) of the
+    seat's width — the fan skew itself contributes no material behind the
+    nut line. half_span parameterizes the nut segment (its ends sit at
+    lateral +/-half_span), matching slot_layout.
+    """
+    frets, _ = fanned_positions(bass_scale, treble_scale, 0,
+                                perpendicular_fret)
+    x_bass, x_treble = frets[0]
+    cos_fan = (2.0 * half_span) / math.hypot(x_bass - x_treble,
+                                             2.0 * half_span)
+    return nut_slot_width / cos_fan
 
 
 def _x_on_segment_line(segment, y):
@@ -517,13 +534,16 @@ def head_lengths_to_posts(nut_geometry, posts, margin=0.0):
 
 
 def taper_outline(fret_zero_segment, bridge_segment, last_fret_segment,
-                  spread_nut, spread_bridge, nut_width, overhang):
+                  spread_nut, spread_bridge, nut_width, overhang,
+                  setback=0.0):
     """Four corners of the tapered fretboard outline (a closed polygon).
 
     The side edges follow the outer strings, offset outward by a constant
     margin of (nut_width - spread_nut) / 2. The board runs from the fret-0
-    line to the last fret plus overhang. Corner order:
-    [front-bass, end-bass, end-treble, front-treble].
+    line to the last fret plus overhang; setback pushes the front edge that
+    far behind the fret-0 line (along -x, parallel to the possibly fanned
+    nut), e.g. to give a nut slot inside the board material to sit in.
+    Corner order: [front-bass, end-bass, end-treble, front-treble].
     Raises ValueError when the nut width does not exceed the nut spread.
     """
     margin = (nut_width - spread_nut) / 2.0
@@ -547,6 +567,8 @@ def taper_outline(fret_zero_segment, bridge_segment, last_fret_segment,
         return (x1, y1), normalize(x2 - x1, y2 - y1)
 
     front_point, front_direction = line_of(fret_zero_segment)
+    if setback:
+        front_point = (front_point[0] - setback, front_point[1])
     last_point, last_direction = line_of(last_fret_segment)
     nx, ny = -last_direction[1], last_direction[0]
     if nx < 0:

@@ -1,5 +1,58 @@
 # Changelog
 
+## 2.0 — July 2026
+
+### Start from: a real "new fretboard" reset
+
+The dialog always opened with the values of the previous run and there was no
+way back. The **Edit** dropdown at the top is now **Start from**, is always
+visible (it used to hide itself when the document had no layouts), and lists
+two create entries before the editable layouts:
+
+- **New fretboard (last used values)** — the previous behavior, still the
+  default.
+- **New fretboard (default values)** — resets every field, checkbox, dropdown
+  and group in the dialog to the add-in defaults. Switching back to *last
+  used* restores the stored settings, so the reset costs nothing; the file is
+  written only when you press OK.
+
+Selecting either New entry also clears the parameters an edit target left in
+the dialog — previously, picking a layout to edit and changing your mind kept
+its values with no way to undo them short of cancelling the command.
+
+### The add-in creates the fretboard (command renamed to "Create Fretboard")
+
+There is no reason to model a board blank first just so the add-in can cut
+it — the command now creates the whole fretboard from scratch:
+
+- **No selections at all.** The old fret-zero / fretboard-top / center-line
+  pickers (and Flip direction) are gone. A new component is created under the
+  active component in a fixed frame: fret 0 at the origin, neck along +X,
+  board top on the XY plane (move/joint the component to place it). All
+  geometry is drawn with native objects in that component's own space — the
+  occurrence-proxy mapping machinery is gone with the selections.
+- **The board body is generated**: the tapered outline is extruded down by
+  the new **Board thickness** (default 6 mm), and every cut (slots, nut seat,
+  radius) targets that body. "Draw fretboard outline" / "Cut board to
+  outline" checkboxes are obsolete and removed — the outline *is* the board.
+- **Board start behind nut** (new) replaces the old **Nut offset**: instead of
+  shifting the layout into a pre-existing board, the board's front edge is
+  extended behind fret 0 (stored settings are migrated). The info box warns
+  when a nut seat would hang off the board front, and cutting a nut seat with
+  no setback is rejected (there would be nothing to cut into).
+- **Board-aware validation** (new): slot/nut depths must be smaller than the
+  board thickness; the radius edge drop must leave material at the edges.
+- Radius station planes now offset from the component's yZ plane and the
+  tuner planes from the XY plane, both probe-verified as before; the loft
+  and cuts are participant-limited to the generated board.
+- **Cut slots** now defaults to on — a generated board with uncut slots is
+  rarely what you want (untick it for a sketch-only layout).
+- Layout metadata bumped to **v7** (adds the board extrude token, thickness
+  and setback). Pre-2.0 layouts cut a user-modeled board via selections the
+  dialog no longer has, so they are hidden from the Edit dropdown — recreate
+  them once with the new flow. Editing a v7 layout rebuilds the board body
+  in place inside the same component.
+
 ## 1.1 — July 2026
 
 ### Tuner layout v1 (Hardware group)
