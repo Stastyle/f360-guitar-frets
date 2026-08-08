@@ -4,17 +4,30 @@ The add-in leans on a few Fusion 360 API behaviors that are worth verifying
 once per Fusion release, in **Utilities → Text Commands** (switch the input
 mode from `Txt` to `Py`). Paste one block at a time.
 
-## 1. Feature ordering inside `build_slots` (do not shuffle)
+## 1. The created-board flow (v2.0) and its canonical frame
 
-Sketches first (slot, bridge, strings, taper — they all reference the pristine
-top face), then the radius loft (needs the pristine face for its normal and
-`setByAngle` reference), then the outline Intersect cut (TRIMS the top face —
-face references are stale from here on), then the slot/nut extrudes (which
-only use the board BODY captured at the start and sketch profiles). The
-"Select Fret Slots" button and its custom-event plumbing were removed
-(2026-07-11); its sketch-lookup helpers (`_find_fret_sketches`,
-`_sketch_instances`) now live in `CreateFretSlotsCommand.py` and serve the
-Edit dropdown.
+The command no longer cuts a pre-existing board — it CREATES the fretboard:
+a new component (`activeComponent.occurrences.addNewComponent(identity)`),
+everything drawn with **native objects in that component's own space**, in a
+canonical frame: fret 0 at the origin, neck along +x, board top on the XY
+plane, up +z. There are no selections, no occurrence proxies, no
+`createForAssemblyContext`, and no face references to go stale — construction
+planes (XY, yZ) are the only sketch/feature references.
+
+Feature order inside `build_slots` (do not shuffle):
+
+1. **Outline sketch → board extrude** (`_extrude_board`, NewBody, downward so
+   the top face stays at z = 0 — verified via the body's bounding box, not
+   the extent sign convention). Everything else cuts into this body.
+2. Slot sketch curves (the sketch object itself is created/kept first — it
+   carries the metadata attribute), bridge mark, string layout, tuner
+   sketches/planes.
+3. Radius loft (participant-limited to the board body).
+4. Slot/nut extrude cuts (profiles from the slot sketch, participant board).
+
+On failure, a NEW layout is cleaned up by deleting the whole occurrence; an
+EDITED layout deletes the recreated pieces feature-before-consumed-object
+(see `_delete_tracked` order) and leaves the user's slot sketch for undo.
 
 ## 2. `isValidResult` keeps the preview and skips execute
 
@@ -24,41 +37,7 @@ does not fire the execute event. `on_execute` keeps a `_preview_ok` guard as a
 fallback either way, so a behavior change here degrades gracefully (worst case:
 geometry is rebuilt once on OK).
 
-## 3. Plane/line intersection
-
-```python
-import adsk.core
-pl = adsk.core.Plane.create(adsk.core.Point3D.create(0,0,1), adsk.core.Vector3D.create(0,0,1))
-ln = adsk.core.InfiniteLine3D.create(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(0,0,1))
-print(pl.intersectWithLine(ln).asArray())   # expect (0.0, 0.0, 1.0)
-```
-
-## 4. Fret-zero location and neck direction
-
-Fret 0 comes from the fret-zero reference: a planar face is intersected with
-the (extended) center line via `Plane.intersectWithLine`; a sketch line uses
-`fret_math.closest_point_parameter` (pure Python, unit-tested) to find the
-nearest point on the center line. The neck direction is simply "from fret 0
-toward the farther endpoint of the selected center line", optionally flipped
-by the checkbox — no face normals involved, so there is no
-`isParamReversed`/evaluator orientation risk. The **nut offset** then
-translates the fret-zero anchor point (and with it the whole local frame)
-along the neck in 3D — local-frame math never sees the offset. Multi-scale
-layouts are anchored in `fret_math.fanned_positions` so the rearmost end of
-the fanned nut line is at local x = 0: nothing reaches behind the reference.
-
-## 5. `Sketches.addWithoutEdges`
-
-Used so the fretboard face outline is NOT auto-projected into the slot sketch —
-projected outlines would slice every overhanging rectangle into several
-profiles and break the profile-based cuts. `_create_sketch` falls back to
-plain `add()` + deleting `isReference` curves if the method is missing:
-
-```python
-print([m for m in dir(d.rootComponent.sketches) if 'add' in m.lower()])
-```
-
-## 6. `addThreePointRectangle` corner semantics
+## 3. `addThreePointRectangle` corner semantics
 
 `fret_math.segment_rectangle` returns (corner1, corner2, corner3) where
 corner1→corner2 is one full side (the slot-width side) and corner3 is the
@@ -75,55 +54,54 @@ sk.sketchCurves.sketchLines.addThreePointRectangle(
     adsk.core.Point3D.create(1, 3, 0))
 ```
 
-## 7. Radius cut internals (verify on first use)
+## 4. Board extrude direction is probed, not assumed
 
-`_apply_radius` builds two transverse planes and loft-cuts an arc profile pair
-over the board. API assumptions to check if it misbehaves:
+`_extrude_board` extrudes the outline with a −thickness distance first and
+checks `feature.bodies.item(0).boundingBox.maxPoint.z <= 1e-4` (the board
+must hang BELOW the sketch plane so slot cuts measured downward land in it);
+a body that comes out above the plane is deleted and redone with the
+opposite sign. The same distrust-and-probe idea is used for every
+construction plane (radius stations, tuner planes): a sketch is added on the
+candidate plane and a known component-space point must map to sketch z ≈ 0.
 
-- The base plane comes from `setByAngle(construction line, 90°, topFace)`,
-  where the line is drawn by the add-in in the slot sketch, exactly across the
-  neck at fret 0. This keeps the plane perpendicular to the neck even for
-  fanned layouts (whose nut is skewed) and keeps all references inside the
-  board's component. The arc half-span is `params.radius_span` — widened to
-  the board's widest half-width when the taper outline is drawn.
-- `ConstructionPlaneInput.setByOffset(basePlane, distance)` — offset sign is
-  taken along the plane's normal; the code resolves the sign with a dot
-  product against the neck direction. If the loft lands on the wrong side, the
-  offset-sign convention differs — flip `sign` in `_apply_radius`.
-- A radius layout has no flat top face afterwards (the loft consumes it), so
-  edit mode allows an empty top selection when the metadata records a radius:
-  build_slots deletes the old loft first (restoring the face) and re-resolves
-  it via the stored `top_token` (`_restore_top_entity`). For the same reason
-  the board body and all selection tokens are captured BEFORE any feature is
-  created in `build_slots`.
-- Transformed (rotated/moved) occurrences are only partially handled: normals
-  come from selection proxies (root space), but the construction-plane normal
-  used for the offset sign is component space. If a rotated occurrence
-  misbehaves, the loft errors out rather than cutting silently wrong.
+## 5. Radius cut internals
+
+`_apply_radius` builds two transverse planes and loft-cuts an arc profile
+pair over the board. API assumptions to check if it misbehaves:
+
+- Station planes come from `setByOffset(yZConstructionPlane, ±station_x)` —
+  the yZ plane is exactly perpendicular to the neck (+x) in the canonical
+  frame, for fanned layouts too. The offset SIGN is probed per station (see
+  §4); if both signs miss, the build aborts with a FretSlotsError.
+- The loft covers `back_x = −(2 cm + nut skew + board setback)` to 1 cm past
+  the board end, and the arc half-span is `params.radius_span` — widened to
+  the board's widest half-width so no flat shoulders remain along the edges.
 - `SketchArcs.addByCenterStartSweep(center, start, sweep)` — positive sweep is
   assumed counter-clockwise in sketch coordinates, so sweeping `2θ` from the
   `α−θ` endpoint passes through the crown. A backwards arc would make the
   profile open (caught: `profiles.count == 0`).
 - `LoftFeatures` cut with `participantBodies = [board]` keeps the radius from
-  slicing the nut or neck.
+  slicing anything else.
+- Validation guarantees the edge drop of the radius is smaller than the board
+  thickness (else the loft would split the board lengthwise).
 - All of it runs inside preview too; on any failure the created planes and
   sketches are deleted and a `FretSlotsError` explains what to try.
 
-## 8. Tuner layout internals (added with v1.1)
+## 6. Tuner layout internals
 
 - Pure math lives in `fret_math.tuner_reference` (pytest-covered): station
   interleaving for splits, reversed-headstock mirroring, plan↔face mapping
   with the hinge (`plan = break_offset + face·cos θ`), clearance checks,
   per-string head extensions. The command only adapts params and draws.
 - **Tilted plane chain** (θ > 0, `_apply_tuner_plane`): offset construction
-  plane `setByOffset(native_top, −face_drop)` → hinge sketch on it → hinge
-  line (perpendicular to the center line at `break_offset` behind the datum)
-  → angled plane `setByAngle(hinge_line, θ, reference)` → tuner sketch on
-  that plane. Neither the offset sign nor the angle sign is trusted: each
-  candidate plane gets a probe sketch, and a known 3D point (the dropped
+  plane `setByOffset(xYConstructionPlane, −face_drop)` → hinge sketch on it →
+  hinge line (across the neck at `break_offset` behind fret 0) → angled plane
+  `setByAngle(hinge_line, θ, reference)` → tuner sketch on that plane.
+  Neither the offset sign nor the angle sign is trusted: each candidate
+  plane gets a probe sketch, and a known component-space point (the dropped
   hinge center / a point 2 cm down the face) must map to sketch z ≈ 0, else
   the other sign — and for setByAngle also the other reference planarEntity
-  (`native_top`, then the offset plane) — is tried; all-fail raises
+  (the XY plane, then the offset plane) — is tried; all-fail raises
   `FretSlotsError` instead of drawing a flipped reference. Pre-flight:
 
   ```python
@@ -146,56 +124,83 @@ over the board. API assumptions to check if it misbehaves:
   ```
 
 - The face frame inside the tuner sketch is measured, not assumed: the
-  origin/axes come from mapping three root-space probe points
+  origin/axes come from mapping three component-space probe points
   (hinge center, a point 2 cm down the face, a LATERAL point **dropped onto
   the hinge plane** — projecting a top-plane lateral point would smear
   `face_drop·sin θ` into the longitudinal axis).
 - The angle input uses `'deg'` units (`addValueInput(..., 'deg', ...)`);
   `.value` returns radians. `_read_values.read_nonnegative` accepts 0 —
   the standard `read_length` rejects it. Prefill for zero-valid fields
-  (angle, break offset, face drop, row offset, clearance) bypasses
-  `set_value`'s `> 0` guard, like `nut_slot_offset`.
-- Metadata is **version 6**: tuner params plus four tracked tokens
-  (`tuners_token`, `tuner_angled_plane_token`, `tuner_hinge_token`,
-  `tuner_offset_plane_token`), deleted in that (consumed-last) order by
-  `_delete_tracked` — so toggling the feature off on edit removes the whole
-  chain. v5 sketches load fine (missing keys default to feature-off).
+  (angle, break offset, face drop, row offset, slant, clearance, board
+  setback) bypasses `set_value`'s `> 0` guard.
 - With tuners on, the String Layout head extensions are computed per string
   to reach each post (plan station × cos θ mapping included); the manual
   `headstock_length` input/settings slot is never overwritten.
 
-## 9. Misc
+## 7. Metadata and edit mode
+
+- Metadata is **version 7** (created-board flow): every parameter plus the
+  tokens of all created objects — `board_token` (the board extrude),
+  `taper_token` (the outline sketch it consumes), cut/radius/tuner chains.
+  `_delete_tracked` deletes them in consumed-last order; `_find_fret_sketches`
+  lists only v7+ sketches in the Edit dropdown — **older (selection-based)
+  layouts cannot be rebuilt** because the geometry they cut belonged to the
+  user, not the add-in.
+- Rebuilding replaces the slot sketch's curves *in place* (never deletes the
+  sketch object) so a manual Press Pull cut recomputes instead of dying with
+  a lost-profile error; everything else the add-in created — including the
+  board body — is deleted via `_delete_tracked` and recreated. A user
+  feature that referenced the old board geometry will need reattaching after
+  an edit (same caveat as any recreated body).
+- Settings migration: v1 settings stored `nut_slot_offset_expr` (layout
+  shifted into the board); `load_settings` maps it to `board_setback_expr`
+  (board extended behind the nut) when the latter is absent.
+- The **Start from** dropdown (`edit_target`) holds `NEW_LAYOUT_LABELS` first
+  and the editable layouts after them, so `_edit_sketch_from_inputs` indexes
+  `self._edit_sketches` with that offset — adding a create entry means the
+  offset moves with the tuple, not with a literal. Selecting a New entry
+  refills the dialog through `_apply_settings` from either `DEFAULTS` or
+  `self._settings` (the last-used dict loaded in `on_create`); it writes
+  nothing to `settings.json` — only `on_destroy` does, on OK. The four
+  `*_INPUTS` tables at the top of the module are the single settings-key ↔
+  input-id mapping, read by `_apply_settings` and the `on_destroy` save loop;
+  a new persisted input must be added to a table *and* to `on_create`.
+  Programmatic value changes do not re-enter `on_input_changed` (same
+  assumption `_prefill_from_sketch` already relies on).
+
+## 8. Misc
 
 - `Sketch.isLightBulbOn = True` re-shows a sketch that a feature consumed
-  (plain `isVisible` is read-only).
+  (plain `isVisible` is read-only). The outline sketch is always hidden
+  after the build (its geometry lives on as the board body).
 - `ValueCommandInput.value` while the expression is invalid mid-typing: the
   add-in never relies on it (`isValidExpression` is checked first), but the
   template's `get_inputs()` in `Fusion360Utilities` reads `.value` on every
   event. If a Fusion release makes that raise, wrap a tolerant copy of
   `get_inputs` in the command modules — do not edit the verbatim
   `Fusion360Utilities` copy.
-- Occurrences: geometry from proxies arrives in root space; `_create_sketch`
-  creates the sketch in the native component and maps points through a sketch
-  proxy (`createForAssemblyContext`). Verified only for the single-occurrence
-  case; deep nesting is best avoided (edit the component in place instead).
-- Edit mode: the sketch attribute stores the three selections as `entityToken`
-  strings plus every parameter and the tokens of all created objects
-  (metadata version 5); `_prefill_from_sketch` re-resolves selections with
-  `design.findEntityByToken` and pushes them into the selection inputs with
-  `addSelection`. Rebuilding replaces the slot sketch's curves *in place*
-  (never deletes the sketch object) so a manual Press Pull cut recomputes
-  instead of dying with a lost-profile error; everything else the add-in
-  created (cuts, radius, extra sketches, planes) is deleted via
-  `_delete_tracked` and recreated.
+- All geometry is drawn through native sketches of the fretboard component,
+  so `modelToSketchSpace`/`sketchToModelSpace` operate in that component's
+  space and occurrence transforms of the parent assembly are irrelevant.
 - Separate nut depth: `_partition_slot_profiles` tells the nut profile apart
   from the fret profiles by `areaProperties().area` — a scalar, immune to
   coordinate-space ambiguity. When nut and fret widths are within 1.5× of
   each other, partitioning is skipped and everything cuts at the fret depth.
 - After a build, every created curve is locked (`isFixed = True`, i.e. fully
-  defined) and only the String Layout and Bridge Mark sketches stay visible;
-  the slot/outline sketches are hidden only when their cut exists, and the
-  radius tooling (profile sketches + planes) is always hidden.
-- New layouts wrap everything they created in one timeline group
+  defined) and only the working-reference sketches (String Layout, Bridge
+  Mark, Tuner Layout) stay visible; the slot sketch is hidden only when its
+  cut exists — and explicitly re-shown otherwise, since an edit may inherit
+  a hidden sketch from a run whose cut is now unchecked — and the outline
+  sketch and radius/tuner tooling are always hidden.
+- New layouts wrap everything they created — including the new component's
+  occurrence — in one timeline group
   (`timeline.timelineGroups.add(start, end)`); edits cannot join it because
   recreated features land at the end of the timeline and groups must be
   contiguous.
+- Validation knows the board now: slot/nut cut depths must be smaller than
+  the board thickness, the radius edge drop must not eat the full thickness,
+  and a nut-seat cut requires a board setback — the board front edge runs
+  PARALLEL to the (possibly fanned) nut line, so seat coverage is
+  perpendicular (`setback * cos(fan)`, see
+  `fret_math.nut_seat_setback_required`) and the fan skew itself never
+  provides material under the seat.

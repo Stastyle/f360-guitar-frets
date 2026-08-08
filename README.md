@@ -1,11 +1,13 @@
 # Guitar Frets — Fusion 360 Add-in
 
-Lay out a guitar neck, ready to cut, from one dialog: **Create Fret Slots**
-draws fret slot rectangles at mathematically correct positions
-(`scale × (1 − 2^(−n/12))`), standard or **multi-scale (fanned)**, an optional
-nut slot with its own depth, a bridge mark, **string guide lines**, a
-**tapered board outline** (optionally cutting the board to it), an optional
-single or **compound radius** cut, and an optional Push/Pull cut of the slots.
+Create a complete fretboard, ready to cut, from one dialog — nothing has to
+be modeled beforehand. **Create Fretboard** builds the **tapered board body**
+itself and puts everything on it: fret slots at mathematically correct
+positions (`scale × (1 − 2^(−n/12))`), standard or **multi-scale (fanned)**,
+an optional nut slot with its own depth, a bridge mark, **string guide
+lines**, an optional single or **compound radius** cut, and a **tuner post
+layout** — with the slots cut Push/Pull style in the same operation (or left
+as a sketch).
 
 ## Installation
 
@@ -23,73 +25,79 @@ The button appears in a **Guitar Frets** panel on the **Utilities** tab and in
 
 ## Usage
 
-### Create Fret Slots
+### Create Fretboard
 
-Model at least a fretboard blank, and draw a center line along the neck (a
-sketch line on the fretboard top works well). Then click **Create Fret Slots**
-and select:
+Open (or create) a design and click **Create Fretboard** — there is nothing
+to select and nothing to model first. The add-in creates a **new component**
+containing the board body and all layout sketches, in a fixed frame: fret 0
+at the component origin, the neck running along **+X**, the board top on the
+**XY plane** (the board hangs below it). Move or joint the component to place
+the fretboard on your neck.
 
-| Input | What to pick |
-|---|---|
-| **Fret zero (nut)** | Where fret 0 sits — pick *one* of: the nut's face that looks toward the neck, the end face of the fretboard where the nut will go, or a sketch line drawn across the neck at the nut position. Fret distances are measured from here along the center line. |
-| **Fretboard top** | The flat top face of the fretboard. The slot sketch is created on it. |
-| **Center line** | A sketch line or straight edge running along the middle of the neck. Frets march from fret 0 *toward the far end of this line* — if they head the wrong way, tick **Flip direction**. |
+The **Start from** dropdown at the top of the dialog decides which values you
+begin with:
 
-The selections are guided: after each pick the next selection activates by
-itself, and the tooltip beside the cursor (1/3 → 2/3 → 3/3) tells you what to
-pick next — no need to click the dialog between picks.
+- **New fretboard (last used values)** — the default: your previous run's
+  settings, for iterating on the same instrument.
+- **New fretboard (default values)** — a genuinely fresh start: every field,
+  checkbox and dropdown snaps back to the add-in defaults (25.5 in, 22 frets,
+  no multi-scale, no radius, no tuners), as if you had never run it.
+- **an existing layout of this document** — loads that fretboard's parameters
+  back to edit it in place (see [Changing the layout](#changing-the-layout)).
+
+Switching back and forth is free: the last-used values are still there after
+a reset to defaults, and either New entry clears an edit target's parameters.
+Nothing is written to disk until you press OK.
 
 Parameters: **scale length** (default 25.5 in — type any unit, e.g. `648 mm`),
 **number of frets** (default 22), **fret slot width** (default 0.6 mm, a typical
 fret-saw kerf), **fret slot length** across the neck (default 60 mm — keep it a
-little wider than the board so the slots overhang the tapered edges; Press Pull
+little wider than the board so the slots overhang the tapered edges; the cut
 only removes material where the board actually is), and an optional **nut slot**
 with its own width (default 3.5 mm). The nut slot is cut *backward* from fret 0:
-its neck-side edge sits exactly on the fret-zero reference and the slot extends
-away from the frets, where the nut material goes.
+its neck-side edge sits exactly on fret 0 and the slot extends away from the
+frets, where the nut material goes.
 
-To cut the slots right away, tick **Cut slots (Push/Pull)** and enter the
-**slot depth** (default 2.5 mm) — the sketch *and* the cut are created together,
-and the cut shows in the live preview. Leave it unchecked to get just the
-sketch.
-
-**Nut offset** shifts fret 0 — and the *whole layout* with it (frets, nut
-slot, strings, outline, bridge, radius) — along the neck away from the
-selected fret-zero reference. Use it to push the assembly into the board, e.g.
-when the nut sits in a slot inside the fretboard instead of against its end
-(positive = into the board; 0 keeps fret 0 exactly on the reference).
+To cut the slots right away, keep **Cut slots (Push/Pull)** ticked and enter
+the **slot depth** (default 2.5 mm) — the board, the sketch *and* the cut are
+created together, and everything shows in the live preview. Untick it to get
+just the board and the sketch.
 **Nut slot depth** — shown when **Cut slots** is on — cuts the nut seat at its
 own, usually shallower, depth (default 1.5 mm; a second Push/Pull feature,
 separate from the fret slots — the nut profile is told apart from the fret
-profiles by its area). The info box shows the exact span the nut seat covers
-relative to the reference: make sure your board covers it, or part of the seat
-is cut in the air.
+profiles by its area).
+
+#### Fretboard body
+
+The board body is generated from the tapered outline (see below):
+**board thickness** (default 6 mm) sets its height, and **board start behind
+nut** extends the front edge behind fret 0 (default 0 — the board starts
+exactly at fret 0 and the nut sits against its end face). When the nut sits
+in a slot *inside* the board, set the setback to at least the nut slot width;
+the info box shows the exact span the nut seat covers and warns when part of
+it would hang off the board front. **Nut width** and **board end past last
+fret** shape the outline: the side edges follow the outer strings with a
+constant margin of `(nut width − nut spread) / 2`, from the (possibly
+setback) front edge to the last fret plus the overhang.
 
 With multi-scale layouts the fan is anchored so the *rearmost end* of the
-angled nut line sits exactly on the fret-zero reference — nothing of the fret
-layout reaches behind the edge you selected, so the full fan is on the board
-and manufacturable.
+angled nut line sits exactly at fret 0 — nothing of the fret layout reaches
+behind the board front (at setback 0), so the full fan is on the board and
+manufacturable.
 
 **Mark bridge position** (on by default) adds a construction line across the
 neck at the full scale length from fret 0 — the theoretical saddle contact
 point, for placing the bridge. It is a reference only (never selected or cut).
 Remember that a real saddle sits slightly farther for intonation compensation.
 
-#### Strings and board outline
+#### String layout
 
 **Draw string lines** creates a separate **String Layout** sketch: one straight
 line per string, from the bridge line through the nut and continuing past it by
 the **headstock line length** — extend them under your headstock to align the
 tuners. Inputs: number of strings, string spread (outer string to outer string)
-at the nut and at the bridge.
-
-**Draw fretboard outline** creates a separate **Fretboard Outline** sketch: a
-closed tapered outline you can extrude into the board blank. You enter the
-**nut width** and the bridge string spread; the side edges follow the outer
-strings with a constant margin of `(nut width − nut spread) / 2`, from fret 0
-to the last fret plus the **board end** overhang. Tick **Cut board to
-outline** to also trim the board body to that shape right away (an Intersect
-extrude through the whole blank — requires the top face selection).
+at the nut and at the bridge. The spreads are used even with the lines off:
+they define the board taper and the tuner geometry.
 
 #### Tuner layout
 
@@ -119,7 +127,7 @@ drop** below the fretboard top. Drill perpendicular to that face. At 0° the
 posts are drawn on the fretboard plane (correct for flat Fender-style
 headstocks; note plan-view distances understate on-face distances by
 1/cos(angle) on tilted builds — that is why the plane exists). Tilted mode
-needs a single-scale layout and the flat top FACE selected.
+needs a single-scale layout.
 
 With tuners on, the string-line head extensions automatically reach each
 string's own post (the manual **headstock line length** is preserved for
@@ -131,61 +139,49 @@ defaults is in [HARDWARE_RESEARCH.md](HARDWARE_RESEARCH.md).
 
 Tick **Multi-scale** and enter the **bass side scale**, **treble side scale**,
 and the **perpendicular fret** (the one that stays straight, commonly 7–9).
-Fret midpoints follow the mean scale; the nut, bridge mark, strings, and taper
-all fan accordingly. The fan is anchored so the *rearmost end* of the angled
-nut line sits exactly on your fret-zero reference — nothing reaches behind the
-edge you selected, so the whole layout is on the board and manufacturable.
-The bass side is the **left** side looking from the nut toward the bridge —
-if the fan leans the wrong way in the preview, swap the two scale values.
+Fret midpoints follow the mean scale; the nut, bridge mark, strings, and board
+taper all fan accordingly, and the board's front edge stays parallel to the
+fanned nut. The bass side is the **left** side looking from the nut toward
+the bridge — if the fan leans the wrong way in the preview, swap the two
+scale values.
 
 #### Fretboard radius
 
 Choose **Single radius** (one radius, e.g. `9.5 in`) or **Compound radius**
 (e.g. `9.5 in` at the nut to `16 in` at the board end). The add-in sketches an
-arc profile at each end and loft-cuts the crown off the board — so the top you
-selected must still be **flat**, and the cut only touches the board body.
-Note: the slot cut depth is measured from the original flat top, so edge slots
-end up shallower by the radius drop (the info box prints that number — add it
-to your slot depth if it matters).
+arc profile at each end and loft-cuts the crown off the board body it just
+created. Note: the slot cut depth is measured from the original flat top, so
+edge slots end up shallower by the radius drop (the info box prints that
+number — add it to your slot depth if it matters).
 
 The dialog shows a live preview plus a sanity readout — the 12th fret must sit
-at exactly half the scale length. Your last-used values are remembered.
+at exactly half the scale length. Your last-used values are remembered for the
+next run; **Start from → New fretboard (default values)** resets them.
 
 ### Cutting manually instead
 
-If you created the sketch without **Cut slots**, you can always cut yourself:
-show the Fret Slots sketch, window-select its profiles (or pick them one by
-one), press **Q** (Press Pull) and enter the depth as a negative distance
-(e.g. `-2.5 mm`).
-
-### Radiused (curved) fretboards
-
-If your board is still flat, prefer the built-in **Fretboard radius** option
-above — it cuts the radius for you. The recipe below is for boards that
-*already* have their radius. The fretboard-top selection must be flat, so:
-
-1. **Construct → Tangent Plane** on the radiused top (tangent at the centerline).
-2. Create a sketch on that plane and **Project** the board outline into it.
-3. Draw the center line in that sketch.
-4. In **Create Fret Slots**, select the *tangent plane* as the fretboard top.
-5. After Press Pull, the slot depth is measured from the tangent plane — add the
-   radius drop to your slot depth if you cut before radiusing, or simply slot
-   first and radius afterwards.
+If you created the board without **Cut slots**, you can always cut yourself:
+the Fret Slots sketch stays visible on the board top — window-select its
+profiles (or pick them one by one), press **Q** (Press Pull) and enter the
+depth as a negative distance (e.g. `-2.5 mm`).
 
 ### Changing the layout
 
-Open **Create Fret Slots** again and pick your sketch in the **Edit** dropdown
-at the top of the dialog. All its parameters *and* the original selections are
-loaded back (they are stored on the sketch itself), so you can tweak just the
-value you care about — say, the fret count — and press OK. The slots are redrawn
-in place inside the same sketch, so an existing Press Pull cut recomputes onto
-the new slots instead of breaking. A cut made with the **Cut slots** checkbox
-is managed by the add-in: editing recreates it at the current depth, and
-unchecking the box removes it.
+Open **Create Fretboard** again and pick your layout in the **Start from**
+dropdown at the top of the dialog (its entries come after the two *New
+fretboard* ones). All its parameters are loaded back (they are stored
+on the slot sketch itself), so you can tweak just the value you care about —
+say, the fret count — and press OK. The slots are redrawn in place inside the
+same sketch, and the board body and every other managed object (cuts, radius,
+strings, tuner chain) are recreated inside the same component — so an existing
+manual Press Pull cut on the slot sketch recomputes instead of breaking, but
+features *you* built on the old board body will need reattaching. A cut made
+with the **Cut slots** checkbox is managed by the add-in: editing recreates it
+at the current depth, and unchecking the box removes it.
 
-If a stored selection can't be restored (e.g. the referenced face was deleted),
-the info box asks you to re-pick just that one. Sketches made with older
-versions of the add-in load their values but not their selections.
+Layouts made with pre-2.0 versions of the add-in (which cut a board you
+modeled yourself) are not listed in the Start from dropdown — they reference
+selections the dialog no longer has. Recreate them once with the new flow.
 
 ## Roadmap
 
@@ -201,17 +197,23 @@ presets at the bridge mark — also fully specified there.
 
 - Slots are simple rectangles overhanging the board taper; they are not trimmed
   to the board edges (the cuts ignore the overhang anyway).
-- Layout sketches are tagged with attributes on creation, so the **Edit**
-  dropdown keeps finding them after saving and reopening the file.
-- Settings are stored in `GuitarFrets/settings.json` (created automatically).
+- Layout sketches are tagged with attributes on creation, so the **Start
+  from** dropdown keeps finding them after saving and reopening the file.
+- Settings are stored in `GuitarFrets/settings.json` (created automatically)
+  and are what **New fretboard (last used values)** restores; deleting that
+  file has the same effect as always starting from the default values.
 - All created sketch geometry is locked (fully defined) — nothing can be
-  dragged out of position by accident. After a cutting run, only the
-  **String Layout** and **Bridge Mark** sketches stay visible; the slot
-  sketch, outline sketch, and radius tooling are hidden (the slot sketch
-  stays visible when you skip the cut, so there is something to see).
-- Everything a new layout creates (sketches, planes, cuts) is wrapped in one
-  named **timeline group**. Edits append their recreated features at the end
-  of the timeline, outside the original group.
+  dragged out of position by accident. After a cutting run, only the working
+  references (**String Layout**, **Bridge Mark**, **Tuner Layout**) stay
+  visible; the slot sketch, outline sketch, and radius/tuner tooling are
+  hidden (the slot sketch stays visible when you skip the cut, so there is
+  something to see).
+- Everything a new layout creates (component, board body, sketches, planes,
+  cuts) is wrapped in one named **timeline group**. Edits append their
+  recreated features at the end of the timeline, outside the original group.
+- Validation is board-aware: slot and nut depths must be smaller than the
+  board thickness, the radius edge drop must leave board material, and a
+  nut-seat cut requires a board start behind the nut.
 
 ## Development
 

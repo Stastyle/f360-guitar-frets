@@ -480,6 +480,78 @@ def test_taper_outline_straight_case():
     assert math.isclose(front_bass[1] + front_treble[1], 0.0, abs_tol=1e-9)
 
 
+def test_taper_outline_setback_extends_front_edge():
+    layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
+    plain = fret_math.taper_outline(layout['fret_zero'], layout['bridge'],
+                                    layout['last'], 3.5, 5.25, 4.3, 0.5)
+    setback = fret_math.taper_outline(layout['fret_zero'], layout['bridge'],
+                                      layout['last'], 3.5, 5.25, 4.3, 0.5,
+                                      setback=1.5)
+    front_bass, end_bass, end_treble, front_treble = setback
+    # Front edge moved exactly setback behind fret 0 (straight case).
+    assert math.isclose(front_bass[0], -1.5, abs_tol=1e-9)
+    assert math.isclose(front_treble[0], -1.5, abs_tol=1e-9)
+    # The end edge is untouched.
+    assert math.isclose(end_bass[0], plain[1][0], abs_tol=1e-12)
+    assert math.isclose(end_treble[0], plain[2][0], abs_tol=1e-12)
+    # The extension follows the converging side edges: the board is
+    # slightly narrower at the extended front than at the nut line.
+    assert (front_bass[1] - front_treble[1]
+            < plain[0][1] - plain[3][1])
+    # setback=0 reduces to the plain outline.
+    zero = fret_math.taper_outline(layout['fret_zero'], layout['bridge'],
+                                   layout['last'], 3.5, 5.25, 4.3, 0.5,
+                                   setback=0.0)
+    for (ax, ay), (bx, by) in zip(plain, zero):
+        assert math.isclose(ax, bx, abs_tol=1e-12)
+        assert math.isclose(ay, by, abs_tol=1e-12)
+
+
+def test_taper_outline_setback_fanned_stays_parallel():
+    layout = fret_math.slot_layout(68.58, 64.77, 24, 7, 3.0, 0.06)
+    plain = fret_math.taper_outline(layout['fret_zero'], layout['bridge'],
+                                    layout['last'], 3.5, 5.25, 4.3, 0.5)
+    setback = fret_math.taper_outline(layout['fret_zero'], layout['bridge'],
+                                      layout['last'], 3.5, 5.25, 4.3, 0.5,
+                                      setback=1.5)
+    # The front edge stays parallel to the fanned nut line: both corners of
+    # the shifted edge sit exactly setback behind the original front line at
+    # their own lateral position.
+    def front_x_at(corners, y):
+        (x1, y1), x2y2 = corners[0], corners[3]
+        x2, y2 = x2y2
+        t = (y - y2) / (y1 - y2)
+        return x2 + (x1 - x2) * t
+
+    for corner in (setback[0], setback[3]):
+        assert math.isclose(front_x_at(plain, corner[1]) - 1.5, corner[0],
+                            abs_tol=1e-9)
+
+
+def test_nut_seat_setback_required_single_scale_equals_width():
+    required = fret_math.nut_seat_setback_required(SCALE, SCALE, 0, 3.0, 0.35)
+    assert math.isclose(required, 0.35, abs_tol=1e-12)
+
+
+def test_nut_seat_setback_required_fanned_exceeds_width():
+    # The board front edge parallels the fanned nut line, so covering the
+    # seat takes width / cos(fan angle) of along-neck setback — always more
+    # than the width itself, but far less than width + fan skew.
+    bass, treble, half_span, width = 68.58, 64.77, 3.0, 0.35
+    required = fret_math.nut_seat_setback_required(bass, treble, 7, half_span,
+                                                   width)
+    frets, _ = fret_math.fanned_positions(bass, treble, 0, 7)
+    skew = abs(frets[0][0] - frets[0][1])
+    expected = width * math.hypot(skew, 2 * half_span) / (2 * half_span)
+    assert math.isclose(required, expected, rel_tol=1e-12)
+    assert required > width
+    assert required < width + skew
+    # A setback of `required` shifts the front line back by exactly the seat
+    # width, measured perpendicular to the nut line.
+    cos_fan = (2 * half_span) / math.hypot(skew, 2 * half_span)
+    assert math.isclose(required * cos_fan, width, rel_tol=1e-12)
+
+
 def test_taper_requires_margin():
     layout = fret_math.slot_layout(SCALE, SCALE, 22, 0, 3.0, 0.06)
     try:
