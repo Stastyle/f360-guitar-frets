@@ -29,8 +29,11 @@ import os
 import py_compile
 import re
 import sys
+import tempfile
 import types
 import uuid
+
+sys.dont_write_bytecode = True   # the stub import must not leave __pycache__ behind
 
 STDLIB = set(getattr(sys, 'stdlib_module_names', ()))
 
@@ -118,11 +121,15 @@ def check(addin_dir):
         for filename in files:
             if filename.endswith('.py'):
                 py_files.append(os.path.join(root, filename))
-    for path in py_files:
-        try:
-            py_compile.compile(path, doraise=True)
-        except py_compile.PyCompileError as error:
-            fail('does not compile: {}'.format(error.msg.strip()))
+    # Compile into a scratch folder so the check leaves no __pycache__ in the
+    # add-in (it would be shipped along if the folder is zipped).
+    with tempfile.TemporaryDirectory() as scratch:
+        for index, path in enumerate(py_files):
+            try:
+                py_compile.compile(path, cfile=os.path.join(scratch, '{}.pyc'.format(index)),
+                                   doraise=True)
+            except py_compile.PyCompileError as error:
+                fail('does not compile: {}'.format(error.msg.strip()))
 
     with open(entry_path) as handle:
         entry_source = handle.read()

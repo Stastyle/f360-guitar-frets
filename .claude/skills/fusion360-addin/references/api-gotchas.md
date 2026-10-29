@@ -69,10 +69,14 @@ when something misbehaves.
   `input.expression` (`'25.5 in'` stays `'25.5 in'`); metadata on geometry
   stores the cm values (`*_cm` keys). Prefilling from settings sets
   `.expression`; prefilling from metadata sets `.value`.
-- **Check `isValidExpression` before reading `.value`** — mid-typing the
-  expression is invalid and `.value` is garbage (or raises in some
-  releases). The framework's `get_inputs()` reads `.value` unguarded on
-  every event; do not edit the verbatim framework — wrap your own reader.
+- **Check `isValidExpression` before reading `.value`** — mid-typing
+  (`1/`, `25.5 i`) the expression is invalid and `.value` returns the last
+  valid value *(verify; current releases do not raise)*, so computing from
+  it silently uses a stale number. The framework's `get_inputs()` reads
+  `.value` unguarded before every event and relies on that non-raising
+  behavior; do not edit the verbatim framework — read inputs through your
+  own guarded reader, and if a release ever makes `.value` raise, give the
+  command module a tolerant copy of `get_inputs`.
 - `addValueInput(id, label, units, ValueInput.createByString(expr))` **raises
   when the stored expression is invalid in this document** (e.g. it named a
   user parameter of another design). Fall back to the default expression
@@ -201,9 +205,13 @@ Order of events for one dialog run:
 - `setByAngle` accepts an axis line that lies *off* the reference plane
   *(verify)* — the tuner chain relies on it (hinge line on an offset plane,
   reference = XY plane).
-- Component construction planes: `xYConstructionPlane`, `yZConstructionPlane`,
-  `xZConstructionPlane`; use them as the only sketch references in a
-  generated component so nothing references a face that may change.
+- Component construction planes: `xYConstructionPlane` (z = 0),
+  `yZConstructionPlane` (x = 0), `xZConstructionPlane` (y = 0) *(verify the
+  latter two once per release; only XY and yZ have been used in production
+  here)*; use them as the only sketch references in a generated component
+  so nothing references a face that may change. A panel on another face of
+  a box is a sketch on an offset of the matching base plane, probed the
+  same way.
 
 ## 7. Features (extrude, cut, loft)
 
@@ -212,10 +220,11 @@ Order of events for one dialog run:
   operations `NewBodyFeatureOperation`, `CutFeatureOperation`,
   `IntersectFeatureOperation`, `JoinFeatureOperation`.
 - **Probe the extrude direction** instead of assuming the sign: extrude,
-  check `feature.bodies.item(0).boundingBox` (e.g. `maxPoint.z <= 1e-4` for a
-  body that must hang below the sketch plane), delete and redo with the
-  opposite sign if wrong. For cuts, try `-depth` then `+depth`; a cut that
-  removes nothing raises on `add`.
+  check `feature.bodies.item(0).boundingBox` against where the body *must*
+  be (`maxPoint.z <= 1e-4` for a body hanging below the sketch plane; "the
+  box lies inside the outer envelope" for a panel of a multi-body part),
+  delete and redo with the opposite sign if wrong. For cuts, try `-depth`
+  then `+depth`; a cut that removes nothing raises on `add`.
 - `participantBodies = [body]` on cut/intersect/loft inputs keeps the
   operation from touching other bodies (and makes overshooting through-cuts
   harmless).

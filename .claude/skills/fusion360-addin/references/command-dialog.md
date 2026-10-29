@@ -25,6 +25,11 @@ The command class holds no geometry logic; `build()` holds no dialog logic;
 split is what lets you add an input in three places (DEFAULTS, a table,
 `on_create`) and have it persist, prefill and validate automatically.
 
+Keep all four tables even when one is empty (`SPINNER_INPUTS = ()`): the
+loops over them in `_apply_settings` and `on_destroy` are no-ops, and the
+next feature that needs a spinner or dropdown slots in without touching
+the loops.
+
 ## Adding an input — checklist
 
 1. `DEFAULTS[key]` with the default *expression* (`'5 mm'`), int, bool or

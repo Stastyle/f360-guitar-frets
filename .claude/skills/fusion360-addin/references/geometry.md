@@ -42,6 +42,15 @@ user deletes that entity (hide them from the edit dropdown with a note).
 Do not shuffle: a later step must not hold a face reference taken before an
 earlier cut changed that face.
 
+**Several bodies** (panels of a box, a set of parts): treat each as its own
+"outline sketch → NewBody extrude" on a sketch placed on the matching base
+plane or an offset of it (`xYConstructionPlane` for a horizontal panel,
+`xZConstructionPlane`/`yZConstructionPlane` for vertical ones — see
+api-gotchas §6 about verifying their orientation), probe each extrude by
+checking that the body's bounding box lands inside the part's outer
+envelope, name each body, and track every extrude token in the metadata.
+Cuts that must affect one body only get `participantBodies = [that body]`.
+
 ## Probe every sign convention
 
 Whether an offset plane goes +z or −z, whether a positive extrude distance

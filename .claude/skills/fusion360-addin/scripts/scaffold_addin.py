@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -111,6 +112,7 @@ def main():
         'COMMAND_NAME': command_name,
         'COMMAND_ID': 'cmdID_{}_{}'.format(name, words_to_camel(command_name)),
         'CMD_SLUG': cmd_slug,
+        'CMD_CAMEL': words_to_camel(command_name),
         'PART_NAME': part_name,
         'PANEL_NAME': panel_name,
         'DESCRIPTION': description.replace('"', "'"),
@@ -156,9 +158,12 @@ def main():
 
     written.extend(make_icon_set(os.path.join(addin_dir, 'resources', cmd_slug)))
 
-    for path in written:
-        if path.endswith('.py'):
-            py_compile.compile(path, doraise=True)
+    # Compile-check without leaving __pycache__ folders in the add-in.
+    with tempfile.TemporaryDirectory() as scratch:
+        for index, path in enumerate(written):
+            if path.endswith('.py'):
+                py_compile.compile(path, cfile=os.path.join(scratch, '{}.pyc'.format(index)),
+                                   doraise=True)
 
     print('Scaffolded {} in {}:'.format(name, target))
     for path in written:

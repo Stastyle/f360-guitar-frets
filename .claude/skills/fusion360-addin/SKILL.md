@@ -33,7 +33,8 @@ the add-in, clicks, and pastes back a traceback from a message box. So:
 
 ```bash
 python <skill>/scripts/scaffold_addin.py <repo-dir> --name MyAddin \
-    --command-name "Create Bracket" --description "One sentence for manifest and README"
+    --command-name "Create Bracket" --description "One sentence for manifest and README" \
+    [--part-name Bracket] [--panel-name "My Tools"] [--author "..."]
 ```
 
 It creates the installable folder `<repo>/MyAddin/` (entry module with
@@ -47,9 +48,12 @@ The example command (a plate with a hole grid) is not a toy to delete; it
 is the structure to keep: settings tables, *Start from* dropdown (last used
 / defaults / rebuild an existing layout), validation → info box, preview
 that becomes the result, build in a new component with metadata, timeline
-group and failure cleanup. Replace the inputs and the geometry, keep the
-skeleton. Adding an input is a 3-place change (DEFAULTS, a table, `on_create`)
-— `references/command-dialog.md` has the checklist.
+group and failure cleanup. Replace the inputs, the geometry, the math
+module and the README's usage/frame text (they all describe the plate
+example); keep the skeleton. Adding an input is a 3-place change
+(DEFAULTS, a table, `on_create`) — `references/command-dialog.md` has the
+checklist. For a part made of several bodies (panels, a set of parts), see
+"Several bodies" in `references/geometry.md`.
 
 When extending an **existing** add-in instead, read its DEV_NOTES/README
 first, then compare its command module against the skeleton above; most
@@ -134,7 +138,7 @@ topic), `references/command-dialog.md` (dialog/settings/edit mode),
 | `ModuleNotFoundError` for your own module | absolute import inside the add-in; use `from .module import …`. If the import sits inside a handler, Run succeeds and the click fails ("Command created failed") — move imports to module top |
 | `No module named numpy/PIL/…` | third-party import; Fusion's Python is stdlib-only |
 | Dialog opens with wrong/old values, or defaults after Cancel | settings saved on Cancel / from a half-built dialog; check `on_destroy` guards |
-| Message box on every keystroke | exception escaping `on_preview`; catch and write to the info box |
+| Message box on every keystroke | exception escaping `on_preview` (catch and write to the info box), or the framework's `get_inputs()` tripping over a dropdown with no selected item (see below) |
 | Geometry built twice on OK | `isValidResult` not set, or `_preview_ok` guard missing |
 | Cut/extrude goes the wrong way or "removes nothing" | sign convention assumed; probe and retry the other sign |
 | Sketch on an offset/angled plane is mirrored or shifted | sketch axes assumed; measure the frame with mapped probe points |
@@ -154,7 +158,8 @@ under the VS Code debugger (right-click → *Debug*); a `ui.messageBox` with
 - `python -m pytest tests/ -q` green; `check_addin.py` passes.
 - Manifest version bumped when behavior changed; CHANGELOG entry written.
 - README install steps still match (inner folder name, tab/panel names).
-- `settings.json` gitignored; no absolute paths; no third-party imports.
+- `settings.json` gitignored; no absolute paths; no third-party imports;
+  no `__pycache__` inside the folder you hand over or zip.
 - Every new API assumption has a DEV_NOTES line and a verifying snippet.
 - Commit message explains *why* (the user-visible problem), not just what.
 
