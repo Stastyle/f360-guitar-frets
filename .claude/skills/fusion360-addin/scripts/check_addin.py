@@ -14,6 +14,8 @@ the user installs the add-in and reports a traceback from a message box:
     object construction show up now)
   * every 'cmd_resources' folder referenced from the entry module exists and
     holds 16x16.png and 32x32.png
+  * absolute imports of the add-in's own modules anywhere in the code,
+    including inside handlers (they pass under pytest and fail in Fusion)
   * third-party imports (Fusion's Python has no pip packages for add-ins)
   * settings.json is gitignored when the add-in writes one
 
@@ -152,9 +154,13 @@ def check(addin_dir):
                     continue
                 if os.path.exists(os.path.join(addin_dir, top)) or \
                         os.path.exists(os.path.join(addin_dir, top + '.py')):
-                    notes.append('{} imports local module {!r} absolutely — use a relative '
-                                 'import (from .{} import ...) so it resolves inside Fusion'
-                                 .format(os.path.relpath(path, addin_dir), top, top))
+                    # Works under pytest (the folder is on sys.path there) and
+                    # raises ModuleNotFoundError inside Fusion, where the folder
+                    # is a package — at click time if the import is in a handler.
+                    fail('{} line {} imports local module {!r} absolutely — use a relative '
+                         'import (from . import {} / from .{} import ...) so it resolves '
+                         'inside Fusion'.format(os.path.relpath(path, addin_dir),
+                                                node.lineno, top, top, top))
                     continue
                 fail('{} imports third-party module {!r}; Fusion add-ins run on Fusion\'s own '
                      'Python with the standard library only'.format(

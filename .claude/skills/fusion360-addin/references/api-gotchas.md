@@ -32,7 +32,10 @@ when something misbehaves.
   Fusion imports the entry module as `<Folder>.<Folder>` with the folder as
   its package (no `__init__.py` needed), so **sibling modules must be imported
   relatively**: `from .MyCommand import MyCommand`, `from . import my_math`.
-  An absolute `import my_math` works in pytest and fails inside Fusion.
+  An absolute `import my_math` works in pytest and fails inside Fusion —
+  and if that import sits inside a handler (`on_create`), Run succeeds and
+  the failure only shows on the first click ("Command created failed",
+  no dialog). Keep imports at module top so a typo fails at Run time.
 - **The pure-math module imports nothing from `adsk`.** That is what makes
   it testable with pytest outside Fusion (`sys.path.insert(0, '<Folder>')`
   in the test, then `import my_math`). Keep `constants.py` adsk-free too.
@@ -99,9 +102,16 @@ Order of events for one dialog run:
   would pop a message box on every keystroke. Catch the domain error class
   and write it to the info box; catch everything else and show the last
   traceback line there.
-- **Programmatic input changes do not re-enter `inputChanged`.** After
-  refilling the dialog from settings or metadata, re-apply the visibility
-  rules and refresh the info box explicitly.
+- **Programmatic input changes do not re-enter the running handler.** A
+  `.value`/`.expression`/`isSelected` set from inside `on_input_changed`
+  does not call `on_input_changed` again synchronously, so after refilling
+  the dialog from settings or metadata, re-apply the visibility rules and
+  refresh the info box explicitly. Some writes do produce a *queued*
+  input-changed event afterwards (setting the info box `.text` is known
+  to), and the framework runs `get_inputs()` before each one — so guard the
+  handler against its own writes (`if changed_input.id == 'info_box': return`,
+  set `.text` only when it differs) and never leave a dropdown with no
+  selected item even for a moment (§4).
 - **`on_destroy` fires on Cancel and Esc too.** Check
   `reason == adsk.core.CommandTerminationReason.CompletedTerminationReason`
   before saving anything. Also check that the dialog was fully built (the
@@ -117,10 +127,17 @@ Order of events for one dialog run:
 
 - Ids are the API; labels are UI. Never branch on `changed_input.name`.
 - `addDropDownCommandInput(id, label, adsk.core.DropDownStyles.TextListDropDownStyle)`
-  then `listItems.add(name, isSelected, '')`. **To change the selection,
-  set `item.isSelected = True` on the target only** — clearing the others
-  first leaves the dropdown transiently empty and the framework's
-  `get_inputs()` crashes on `selectedItem.name` at the next event.
+  then `listItems.add(name, isSelected, '')` with exactly one item
+  selected at creation. **To change the selection, set `item.isSelected = True`
+  on the target only** — clearing the others first (or `listItems.clear()`
+  and re-adding, or selecting by a name that matches no item) leaves the
+  dropdown with no selected item, and the framework's `get_inputs()` reads
+  `selectedItem.name` for every dropdown before each event: the symptom is
+  an "Input changed event failed … 'NoneType' … 'name'" box that appears
+  "sometimes" (whenever the rewriting code path runs).
+- The stock framework uses the text **"Input changed event failed"** for
+  three handlers (preview, destroy and input-changed); only the line number
+  in the traceback tells them apart (277 / 304 / 331 in the verbatim file).
 - `addIntegerSpinnerCommandInput(id, label, min, max, step, initial)` —
   when prefilling, ignore a stored value outside `[min, max]` rather than
   clamping it (the spinner would raise).

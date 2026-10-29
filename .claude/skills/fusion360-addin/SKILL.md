@@ -131,7 +131,7 @@ topic), `references/command-dialog.md` (dialog/settings/edit mode),
 | Symptom | Usual cause |
 |---|---|
 | Button does nothing / no dialog | handler not kept referenced; exception in `on_create` swallowed — add `ui.messageBox(traceback.format_exc())` |
-| `ModuleNotFoundError` for your own module | absolute import inside the add-in; use `from .module import …` |
+| `ModuleNotFoundError` for your own module | absolute import inside the add-in; use `from .module import …`. If the import sits inside a handler, Run succeeds and the click fails ("Command created failed") — move imports to module top |
 | `No module named numpy/PIL/…` | third-party import; Fusion's Python is stdlib-only |
 | Dialog opens with wrong/old values, or defaults after Cancel | settings saved on Cancel / from a half-built dialog; check `on_destroy` guards |
 | Message box on every keystroke | exception escaping `on_preview`; catch and write to the info box |
@@ -139,7 +139,7 @@ topic), `references/command-dialog.md` (dialog/settings/edit mode),
 | Cut/extrude goes the wrong way or "removes nothing" | sign convention assumed; probe and retry the other sign |
 | Sketch on an offset/angled plane is mirrored or shifted | sketch axes assumed; measure the frame with mapped probe points |
 | Edit of an old layout fails with lost profile / deleted entity | deletion order (feature before consumed sketch), or the tagged sketch was deleted instead of having its curves replaced |
-| Dropdown crash `selectedItem` is None | selection cleared before the new item was selected; set only the target `isSelected = True` |
+| "Input changed event failed" with `selectedItem` / `'NoneType' … 'name'` | a dropdown with no selected item (cleared before re-selecting, rebuilt live, created with nothing selected, or selected by a name that matches no item); the framework's `get_inputs()` reads `selectedItem.name` before every event. Set only the target `isSelected = True`, whitelist stored values. Note the same message text is used by three handlers — the line number tells preview (277) / destroy (304) / input-changed (331) apart |
 | Button duplicated after re-run | `stop()` did not delete controls/panel/definition |
 | Change seems ignored | module cache; Stop + Run the add-in, else restart Fusion |
 

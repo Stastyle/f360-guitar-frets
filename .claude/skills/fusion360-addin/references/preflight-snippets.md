@@ -15,6 +15,15 @@ d = adsk.fusion.Design.cast(app.activeProduct)
 print(app.version, 'design:', bool(d), 'units:', d.unitsManager.defaultLengthUnits if d else None)
 ```
 
+## How Fusion registered the add-in's modules (package name, relative imports)
+
+```python
+import sys
+print([m for m in sys.modules if m.startswith('GuitarFrets')])   # your folder name
+# expected: ['GuitarFrets', 'GuitarFrets.GuitarFrets', 'GuitarFrets.CreateFretSlotsCommand', ...]
+# a bare 'fret_math' here means something put the folder on sys.path — fix the import instead
+```
+
 ## Inspect the selected entity (type, token, attributes)
 
 ```python
