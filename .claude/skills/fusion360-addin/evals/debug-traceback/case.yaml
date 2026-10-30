@@ -1,0 +1,16 @@
+schema_version: "1.1"
+name: debug-traceback
+expected_outcome: |
+  The answer diagnoses both problems correctly and concretely: (1) the
+  ModuleNotFoundError is because Fusion loads the add-in folder as a package,
+  so sibling modules must be imported relatively (from . import slot_math /
+  from .slot_math import ...), ideally at module top, and a Stop + Run of
+  the add-in (or Fusion restart) is needed for the change to load; (2) the
+  "selectedItem is None" popup comes from a dropdown that was left with no
+  selected item (e.g. the code clears all items before selecting one, or a
+  stored dropdown value no longer matches any item) — the framework's
+  get_inputs reads selectedItem.name on every event — fix by selecting only
+  the target item (isSelected = True) and whitelisting stored dropdown
+  values. It should not blame the "1/8 in" expression itself for the
+  dropdown error and should mention checking isValidExpression before
+  reading .value for mid-typing states.

@@ -240,6 +240,12 @@ scripts/make_icons.py            # icon generator (pure stdlib PNG writer)
 - Command skeleton based on the `Fusion360Utilities` helpers from
   [Fusion360AddinSkeleton](https://github.com/tapnair/Fusion360AddinSkeleton)
   by Patrick Rainsberry (same pattern as our UserParamWindow add-in).
+- The lessons from this project (architecture, API gotchas, dialog/geometry
+  patterns, a project scaffolder and a static checker) are packaged as a
+  Claude Code skill in
+  [`.claude/skills/fusion360-addin/`](.claude/skills/fusion360-addin/SKILL.md)
+  for the next Fusion add-in; copy that folder to `~/.claude/skills/` to use
+  it from any project.
 
 ## License
 

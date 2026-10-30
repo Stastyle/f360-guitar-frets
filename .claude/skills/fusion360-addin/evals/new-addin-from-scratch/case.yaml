@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: new-addin-from-scratch
+expected_outcome: |
+  A complete, installable Fusion 360 add-in project in ./FingerBox: an inner
+  FingerBox/ folder with FingerBox.py (run/stop + toolbar registration),
+  FingerBox.manifest (type addin, UUID id), a command module with a dialog
+  (value inputs with units, checkbox, info box), settings persistence and a
+  live preview that builds in a new component, a pure-Python math module
+  with no adsk import, a pytest suite that passes, generated 16/32 px icons,
+  README with install steps, CHANGELOG and DEV_NOTES. The static checker
+  passes. Sibling modules are imported relatively; no third-party imports.
