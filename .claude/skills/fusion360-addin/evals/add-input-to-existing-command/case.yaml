@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: add-input-to-existing-command
+expected_outcome: |
+  The zero-fret option is wired through every layer the existing command
+  uses: DEFAULTS entries, rows in CHECKBOX_INPUTS / EXPRESSION_INPUTS,
+  inputs added in on_create (with tooltips, the distance hidden unless the
+  checkbox is on), read in _read_values (positive length), validated against
+  fret 1 in validate_and_compute with an actionable message, drawn in
+  build_slots via the math module, stored in the sketch metadata and
+  restored by _prefill_from_sketch, with new pytest cases in
+  tests/test_fret_math.py that pass. CHANGELOG/README mention the option.

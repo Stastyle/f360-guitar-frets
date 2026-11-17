@@ -1,0 +1,65 @@
+# Pure-python geometry for {{NAME}}. No adsk imports, so it can be unit-tested
+# with plain pytest outside Fusion 360 (python -m pytest tests/).
+#
+# All lengths are in whatever unit the caller uses consistently — the add-in
+# passes Fusion internal units (cm). Angles are radians.
+#
+# Local frame of the generated part: the origin is the part's front-left
+# corner on its top face, x runs along the length, y across the width, z up.
+# Points are 2D tuples on the top face; the command maps them into sketch
+# space with the sketch's own modelToSketchSpace.
+
+import math
+
+
+def outline_corners(length, width):
+    """Corners of the rectangular top-face outline, counter-clockwise from
+    the origin."""
+    if length <= 0 or width <= 0:
+        raise ValueError('Length and width must be positive')
+    return [(0.0, 0.0), (length, 0.0), (length, width), (0.0, width)]
+
+
+def hole_centers(length, width, count_x, count_y, margin):
+    """Centers of a count_x × count_y hole grid, spread evenly between the
+    edge margins. A count of 1 centers the row/column.
+
+    Raises ValueError when the grid does not fit inside the margins — the
+    command turns that into a message in the dialog's info box.
+    """
+    if count_x < 1 or count_y < 1:
+        raise ValueError('Hole counts must be at least 1')
+    inner_x = length - 2.0 * margin
+    inner_y = width - 2.0 * margin
+    if inner_x < 0 or inner_y < 0:
+        raise ValueError('The edge margin is larger than half the part')
+
+    def positions(span, count):
+        if count == 1:
+            return [span / 2.0]
+        return [span * i / (count - 1) for i in range(count)]
+
+    return [(margin + x, margin + y)
+            for y in positions(inner_y, count_y)
+            for x in positions(inner_x, count_x)]
+
+
+def min_center_distance(centers):
+    """Smallest distance between any two centers (inf for fewer than two)."""
+    best = math.inf
+    for i, (ax, ay) in enumerate(centers):
+        for bx, by in centers[i + 1:]:
+            best = min(best, math.hypot(bx - ax, by - ay))
+    return best
+
+
+def holes_fit(length, width, count_x, count_y, margin, diameter):
+    """True when every hole stays inside the margins and no two holes touch."""
+    radius = diameter / 2.0
+    if margin < radius:
+        return False
+    try:
+        centers = hole_centers(length, width, count_x, count_y, margin)
+    except ValueError:
+        return False
+    return min_center_distance(centers) > diameter

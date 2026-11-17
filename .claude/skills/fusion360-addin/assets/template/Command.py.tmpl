@@ -1,0 +1,889 @@
+# "{{COMMAND_NAME}}" command: dialog, validation, live preview and build.
+#
+# This is a WORKING example feature (a plate with a grid of holes) that
+# exercises every pattern a real command needs — replace the geometry and the
+# inputs, keep the structure:
+#   * settings tables (one place that maps settings keys <-> input ids)
+#   * a "Start from" dropdown: last used values / defaults / rebuild an
+#     existing layout of this document in place
+#   * validate_and_compute -> (ok, message, params); the message feeds the
+#     info box on every input change
+#   * on_preview builds for real and sets args.isValidResult so OK reuses
+#     the preview; on_execute is only the fallback
+#   * build() creates a new component in a canonical frame, probes every
+#     sign convention instead of trusting it, tags the layout with JSON
+#     metadata (parameters + entity tokens) and wraps the run in a timeline
+#     group; on any failure it removes what it created
+#
+# Fusion internal units: lengths in cm, angles in radians. The dialog shows
+# and stores whatever the user typed (expressions), the math gets cm.
+
+import json
+import math
+import os
+import traceback
+
+import adsk.core
+import adsk.fusion
+
+from . import {{MATH_MODULE}}
+from .constants import (ATTRIBUTE_GROUP, ATTRIBUTE_NAME, METADATA_VERSION,
+                        MIN_EDITABLE_METADATA_VERSION)
+from .Fusion360Utilities.Fusion360CommandBase import Fusion360CommandBase
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'settings.json')
+
+DEFAULTS = {
+    'length_expr': '100 mm',
+    'width_expr': '60 mm',
+    'thickness_expr': '6 mm',
+    'cut_holes': True,
+    'hole_style': 'Through',
+    'hole_diameter_expr': '5 mm',
+    'hole_depth_expr': '3 mm',
+    'holes_x': 4,
+    'holes_y': 2,
+    'edge_margin_expr': '10 mm',
+    'buttons_promoted': False,
+}
+
+# Settings key -> dialog input id. Used in both directions: to refill the
+# dialog from a settings dict (_apply_settings) and to store the dialog back
+# into settings.json (on_destroy). A new persisted input goes in one of these
+# tables AND in on_create.
+EXPRESSION_INPUTS = (
+    ('length_expr', 'length'),
+    ('width_expr', 'width'),
+    ('thickness_expr', 'thickness'),
+    ('hole_diameter_expr', 'hole_diameter'),
+    ('hole_depth_expr', 'hole_depth'),
+    ('edge_margin_expr', 'edge_margin'),
+)
+# (settings key, input id, minimum, maximum) — the range is the spinner's own;
+# a stored value outside it is ignored rather than clamped.
+SPINNER_INPUTS = (
+    ('holes_x', 'holes_x', 1, 20),
+    ('holes_y', 'holes_y', 1, 20),
+)
+CHECKBOX_INPUTS = (
+    ('cut_holes', 'cut_holes'),
+)
+DROPDOWN_INPUTS = (
+    ('hole_style', 'hole_style'),
+)
+# (group input id, settings key that decides whether it starts expanded)
+GROUP_EXPANDERS = (
+    ('grp_holes', 'cut_holes'),
+)
+
+HOLE_STYLES = ('Through', 'Blind')
+
+# The first two entries of the Start-from dropdown create a new part; the
+# entries after them are existing layouts of this document to rebuild.
+CREATE_NEW_LABEL = 'New (last used values)'
+CREATE_DEFAULT_LABEL = 'New (default values)'
+NEW_LAYOUT_LABELS = (CREATE_NEW_LABEL, CREATE_DEFAULT_LABEL)
+
+
+class BuildError(Exception):
+    """An expected geometric problem — shown to the user without a traceback."""
+
+
+class _Params(object):
+    pass
+
+
+# --- settings ---------------------------------------------------------------
+
+def load_settings():
+    settings = dict(DEFAULTS)
+    try:
+        with open(SETTINGS_FILE, 'r') as handle:
+            stored = json.load(handle)
+        for key in DEFAULTS:
+            # Type-check every value: a hand-edited or older file must never
+            # put a string where the dialog expects an int.
+            if key in stored and isinstance(stored[key], type(DEFAULTS[key])):
+                settings[key] = stored[key]
+    except Exception:
+        pass
+    # Dropdown values are whitelisted — a renamed item must not leave the
+    # dropdown with nothing selected.
+    if settings['hole_style'] not in HOLE_STYLES:
+        settings['hole_style'] = DEFAULTS['hole_style']
+    return settings
+
+
+def save_settings(settings):
+    try:
+        with open(SETTINGS_FILE, 'w') as handle:
+            json.dump(settings, handle, indent=2)
+    except Exception:
+        pass
+
+
+# --- metadata (edit mode) ---------------------------------------------------
+
+def _entity_token(entity):
+    try:
+        return entity.entityToken
+    except Exception:
+        return ''
+
+
+def _sketch_metadata(sketch):
+    try:
+        attribute = sketch.attributes.itemByName(ATTRIBUTE_GROUP, ATTRIBUTE_NAME)
+        if attribute and attribute.value:
+            return json.loads(attribute.value)
+    except Exception:
+        pass
+    return {}
+
+
+def _find_layout_sketches(design):
+    """Every sketch this add-in tagged as a rebuildable layout."""
+    sketches = []
+    for attribute in design.findAttributes(ATTRIBUTE_GROUP, ATTRIBUTE_NAME):
+        parent = attribute.parent
+        if not parent:  # attributes can outlive a deleted entity
+            continue
+        sketch = adsk.fusion.Sketch.cast(parent)
+        if not (sketch and sketch.isValid):
+            continue
+        version = _sketch_metadata(sketch).get('version', 0)
+        if isinstance(version, int) and version >= MIN_EDITABLE_METADATA_VERSION:
+            sketches.append(sketch)
+    return sketches
+
+
+def _delete_tracked(design, metadata):
+    """Remove everything a previous run created for a layout, except the
+    tagged sketch itself. Order matters: a feature before the sketch it
+    consumes, or the deletion fails/leaves orphans."""
+    groups = (
+        ('holes_cut_token', adsk.fusion.ExtrudeFeature),
+        ('holes_sketch_token', adsk.fusion.Sketch),
+        ('body_token', adsk.fusion.ExtrudeFeature),
+    )
+    for key, cls in groups:
+        tokens = metadata.get(key) or []
+        if isinstance(tokens, str):
+            tokens = [tokens] if tokens else []
+        for token in tokens:
+            try:
+                for entity in design.findEntityByToken(token):
+                    obj = cls.cast(entity)
+                    if obj and obj.isValid:
+                        obj.deleteMe()
+            except Exception:
+                pass
+
+
+# --- reading and validating the dialog --------------------------------------
+
+def _read_values(inputs):
+    problems = {}
+    values = {}
+
+    def read_length(input_id, label):
+        value_input = inputs.itemById(input_id)
+        # .value raises/garbage while the user is mid-typing an invalid
+        # expression — always check isValidExpression first.
+        if not value_input or not value_input.isValidExpression:
+            problems[input_id] = '{}: enter a valid length.'.format(label)
+            return None
+        value = value_input.value
+        if value <= 0:
+            problems[input_id] = '{}: must be greater than zero.'.format(label)
+            return None
+        return value
+
+    def read_nonnegative(input_id, label):
+        # Zero is legitimate here (unlike read_length).
+        value_input = inputs.itemById(input_id)
+        if not value_input or not value_input.isValidExpression:
+            problems[input_id] = '{}: enter a valid value (0 allowed).'.format(label)
+            return None
+        value = value_input.value
+        if value < 0:
+            problems[input_id] = '{}: must not be negative.'.format(label)
+            return None
+        return value
+
+    def read_spinner(input_id, default):
+        spinner = inputs.itemById(input_id)
+        return int(spinner.value) if spinner else default
+
+    def read_checkbox(input_id):
+        checkbox = inputs.itemById(input_id)
+        return bool(checkbox.value) if checkbox else False
+
+    values['length'] = read_length('length', 'Length')
+    values['width'] = read_length('width', 'Width')
+    values['thickness'] = read_length('thickness', 'Thickness')
+
+    values['cut_holes'] = read_checkbox('cut_holes')
+    values['hole_style'] = None
+    values['hole_diameter'] = values['hole_depth'] = None
+    values['holes_x'] = values['holes_y'] = 0
+    values['edge_margin'] = 0.0
+    if values['cut_holes']:
+        dropdown = inputs.itemById('hole_style')
+        style = (dropdown.selectedItem.name if dropdown and dropdown.selectedItem
+                 else HOLE_STYLES[0])
+        values['hole_style'] = 'blind' if style == 'Blind' else 'through'
+        values['hole_diameter'] = read_length('hole_diameter', 'Hole diameter')
+        if values['hole_style'] == 'blind':
+            values['hole_depth'] = read_length('hole_depth', 'Hole depth')
+        values['holes_x'] = read_spinner('holes_x', DEFAULTS['holes_x'])
+        values['holes_y'] = read_spinner('holes_y', DEFAULTS['holes_y'])
+        values['edge_margin'] = read_nonnegative('edge_margin', 'Edge margin') or 0.0
+
+    return values, list(problems.values())
+
+
+def validate_and_compute(inputs, edit_sketch=None):
+    """Validate all inputs. Returns (ok, message, params)."""
+    app = adsk.core.Application.get()
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        return False, 'Open a design in the Design workspace first.', None
+
+    values, problems = _read_values(inputs)
+    if problems:
+        return False, '\n'.join(problems), None
+
+    if values['cut_holes']:
+        if values['hole_depth'] and values['hole_depth'] >= values['thickness']:
+            return False, ('Hole depth must be smaller than the thickness — '
+                           'choose "Through" for through holes.'), None
+        if not {{MATH_MODULE}}.holes_fit(
+                values['length'], values['width'], values['holes_x'],
+                values['holes_y'], values['edge_margin'], values['hole_diameter']):
+            return False, ('The hole grid does not fit: holes overlap each '
+                           'other or the edge margin. Reduce the counts or '
+                           'the diameter, or enlarge the part.'), None
+
+    params = _Params()
+    for key, value in values.items():
+        setattr(params, key, value)
+    params.edit_sketch = edit_sketch
+    return True, _success_message(design.unitsManager, params), params
+
+
+def _success_message(units_manager, params):
+    units = units_manager.defaultLengthUnits
+
+    def fmt(value):
+        # Internal cm -> the document's display unit, as text.
+        return units_manager.formatInternalValue(value, units, True)
+
+    lines = []
+    if params.edit_sketch:
+        lines.append('Editing "{}" — OK replaces its geometry.'
+                     .format(params.edit_sketch.name))
+    lines.append('Plate {} × {} × {}.'.format(fmt(params.length), fmt(params.width),
+                                             fmt(params.thickness)))
+    if params.cut_holes:
+        centers = {{MATH_MODULE}}.hole_centers(
+            params.length, params.width, params.holes_x, params.holes_y,
+            params.edge_margin)
+        pitch = {{MATH_MODULE}}.min_center_distance(centers)
+        lines.append('{} holes of {}, closest centers {} apart{}.'.format(
+            len(centers), fmt(params.hole_diameter),
+            fmt(pitch) if math.isfinite(pitch) else 'n/a',
+            ', {} deep'.format(fmt(params.hole_depth)) if params.hole_depth else ''))
+    lines.append('Built in its own component: origin at the front-left top '
+                 'corner, length along +X, top face on the XY plane — move or '
+                 'joint the component to place it.')
+    return '\n'.join(lines)
+
+
+# --- geometry helpers -------------------------------------------------------
+
+def _fix_all_curves(sketch):
+    """Lock every curve so the sketch is fully defined and undraggable."""
+    try:
+        curves = [sketch.sketchCurves.item(i) for i in range(sketch.sketchCurves.count)]
+    except Exception:
+        return
+    for curve in curves:
+        try:
+            curve.isFixed = True
+        except Exception:
+            pass
+
+
+def _clear_sketch_curves(sketch):
+    curves = [sketch.sketchCurves.item(i) for i in range(sketch.sketchCurves.count)]
+    for curve in curves:
+        try:
+            if curve.isValid:
+                curve.deleteMe()
+        except Exception:
+            pass
+
+
+def _sketch_point(sketch, x, y, z=0.0):
+    """A component-space point expressed in the sketch's 2D space.
+
+    Sketches here are native to the part's component, so no occurrence
+    transform is involved — but the sketch's own axes are still mapped
+    through modelToSketchSpace rather than assumed."""
+    mapped = sketch.modelToSketchSpace(adsk.core.Point3D.create(x, y, z))
+    return adsk.core.Point3D.create(mapped.x, mapped.y, 0.0)
+
+
+def _draw_outline(sketch, corners):
+    sketch.isComputeDeferred = True   # many curves: defer solving until done
+    try:
+        lines = sketch.sketchCurves.sketchLines
+        points = [_sketch_point(sketch, x, y) for x, y in corners]
+        for i in range(len(points)):
+            lines.addByTwoPoints(points[i], points[(i + 1) % len(points)])
+    finally:
+        sketch.isComputeDeferred = False
+
+
+def _extrude_body(outline_sketch, thickness):
+    """Extrude the outline into the body, hanging BELOW the sketch plane so
+    the top face stays at z = 0 where the layout sketches live.
+
+    The extent sign convention is not trusted: the result is checked via
+    its bounding box and redone with the opposite sign if it came out on
+    the wrong side."""
+    if outline_sketch.profiles.count == 0:
+        raise BuildError('The outline did not form a closed profile to extrude.')
+    profiles = adsk.core.ObjectCollection.create()
+    for profile in outline_sketch.profiles:
+        profiles.add(profile)
+    features = outline_sketch.parentComponent.features.extrudeFeatures
+    for signed_thickness in (-thickness, thickness):
+        try:
+            extrude_input = features.createInput(
+                profiles, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+            extrude_input.setDistanceExtent(
+                False, adsk.core.ValueInput.createByReal(signed_thickness))
+            feature = features.add(extrude_input)
+        except Exception:
+            continue
+        if feature.bodies.count > 0:
+            box = feature.bodies.item(0).boundingBox
+            if box and box.maxPoint.z <= 1e-4:
+                return feature
+        try:
+            feature.deleteMe()
+        except Exception:
+            pass
+    raise BuildError('Could not extrude the body from the outline.')
+
+
+def _cut_profiles(sketch, profiles, depth, participant_body, what):
+    """Extrude-cut the given profiles `depth` into the participant body.
+
+    The sketch normal usually points out of the body, so cutting into it is
+    a negative distance — but that is not guaranteed, so the other sign is
+    tried when the first attempt fails."""
+    if profiles.count == 0:
+        raise BuildError('No {} profiles found to cut.'.format(what))
+    features = sketch.parentComponent.features.extrudeFeatures
+    for signed_depth in (-depth, depth):
+        try:
+            cut_input = features.createInput(
+                profiles, adsk.fusion.FeatureOperations.CutFeatureOperation)
+            cut_input.setDistanceExtent(
+                False, adsk.core.ValueInput.createByReal(signed_depth))
+            if participant_body:
+                cut_input.participantBodies = [participant_body]
+            return features.add(cut_input)
+        except Exception:
+            continue
+    raise BuildError('Could not cut the {} — check that the depth reaches '
+                     'into the body.'.format(what))
+
+
+# --- the build --------------------------------------------------------------
+
+def build(params):
+    """Create or rebuild the whole part. Raises BuildError on expected
+    geometric problems.
+
+    New layout: a fresh component under the active component, the outline
+    sketch (which carries the metadata) on its XY plane, the body extruded
+    below it, holes cut into it, everything wrapped in one timeline group.
+    Edit (params.edit_sketch set): the outline sketch's curves are replaced
+    in place — the sketch object stays alive so anything the user built on
+    it can recompute — and every other tracked object is deleted and
+    recreated in the same component."""
+    app = adsk.core.Application.get()
+    design = adsk.fusion.Design.cast(app.activeProduct)
+
+    created_new = params.edit_sketch is None
+    occurrence = None
+    body_feature = None
+    holes_sketch = None
+    holes_cut = None
+    try:
+        timeline_start = design.timeline.markerPosition
+    except Exception:
+        timeline_start = None
+
+    if created_new:
+        try:
+            occurrence = design.activeComponent.occurrences.addNewComponent(
+                adsk.core.Matrix3D.create())
+            component = occurrence.component
+        except Exception:
+            raise BuildError('Could not create the component:\n{}'.format(
+                traceback.format_exc().splitlines()[-1]))
+        sketch = component.sketches.add(component.xYConstructionPlane)
+    else:
+        sketch = params.edit_sketch
+        component = sketch.parentComponent
+        _delete_tracked(design, _sketch_metadata(sketch))
+        _clear_sketch_curves(sketch)
+
+    try:
+        corners = {{MATH_MODULE}}.outline_corners(params.length, params.width)
+        _draw_outline(sketch, corners)
+        sketch.name = 'Outline ({} x {})'.format(
+            _fmt_default(design, params.length), _fmt_default(design, params.width))
+
+        body_feature = _extrude_body(sketch, params.thickness)
+        body = body_feature.bodies.item(0)
+        try:
+            body.name = 'Plate'
+        except Exception:
+            pass
+
+        if params.cut_holes:
+            centers = {{MATH_MODULE}}.hole_centers(
+                params.length, params.width, params.holes_x, params.holes_y,
+                params.edge_margin)
+            holes_sketch = component.sketches.add(component.xYConstructionPlane)
+            holes_sketch.isComputeDeferred = True
+            try:
+                circles = holes_sketch.sketchCurves.sketchCircles
+                for x, y in centers:
+                    circles.addByCenterRadius(_sketch_point(holes_sketch, x, y),
+                                              params.hole_diameter / 2.0)
+            finally:
+                holes_sketch.isComputeDeferred = False
+            holes_sketch.name = 'Holes ({})'.format(len(centers))
+            profiles = adsk.core.ObjectCollection.create()
+            for profile in holes_sketch.profiles:
+                profiles.add(profile)
+            # Through holes: a little deeper than the body; the cut is
+            # participant-limited so the overshoot touches nothing else.
+            depth = (params.hole_depth if params.hole_depth
+                     else params.thickness + 0.1)
+            holes_cut = _cut_profiles(holes_sketch, profiles, depth, body, 'holes')
+
+        # Tidy up: lock the curves, hide the sketches a feature consumed
+        # (set visibility BOTH ways — an edit may inherit the previous
+        # run's state).
+        for created_sketch in (sketch, holes_sketch):
+            if created_sketch:
+                _fix_all_curves(created_sketch)
+        for hidden in (sketch, holes_sketch):
+            if hidden:
+                try:
+                    hidden.isLightBulbOn = False
+                except Exception:
+                    pass
+
+        metadata = json.dumps({
+            'version': METADATA_VERSION,
+            'length_cm': params.length,
+            'width_cm': params.width,
+            'thickness_cm': params.thickness,
+            'cut_holes': params.cut_holes,
+            'hole_style': params.hole_style,
+            'hole_diameter_cm': params.hole_diameter,
+            'hole_depth_cm': params.hole_depth,
+            'holes_x': params.holes_x,
+            'holes_y': params.holes_y,
+            'edge_margin_cm': params.edge_margin,
+            'body_token': _entity_token(body_feature),
+            'holes_sketch_token': _entity_token(holes_sketch) if holes_sketch else '',
+            'holes_cut_token': _entity_token(holes_cut) if holes_cut else '',
+        })
+        sketch.attributes.add(ATTRIBUTE_GROUP, ATTRIBUTE_NAME, metadata)
+
+        if created_new:
+            try:
+                component.name = '{{PART_NAME}}'
+            except Exception:
+                pass  # e.g. a name collision — the default name stays
+            # New layouts only: edits append their recreated features at the
+            # end of the timeline, away from the original sketch, and groups
+            # must be contiguous.
+            if timeline_start is not None:
+                try:
+                    timeline = design.timeline
+                    end_index = timeline.markerPosition - 1
+                    if end_index > timeline_start:
+                        group = timeline.timelineGroups.add(timeline_start, end_index)
+                        group.name = component.name
+                except Exception:
+                    pass
+    except Exception:
+        # Never leave half-built geometry behind. A new layout lives entirely
+        # in the component this run created; on edit, remove the recreated
+        # pieces feature-before-consumed-sketch and leave the user's tagged
+        # sketch for undo.
+        if created_new:
+            try:
+                if occurrence and occurrence.isValid:
+                    occurrence.deleteMe()
+            except Exception:
+                pass
+        else:
+            for obj in (holes_cut, holes_sketch, body_feature):
+                if obj is None:
+                    continue
+                try:
+                    if obj.isValid:
+                        obj.deleteMe()
+                except Exception:
+                    pass
+        raise
+    return sketch
+
+
+def _fmt_default(design, value):
+    try:
+        units_manager = design.unitsManager
+        return units_manager.formatInternalValue(
+            value, units_manager.defaultLengthUnits, True)
+    except Exception:
+        return '{:.3g}'.format(value)
+
+
+# --- the command ------------------------------------------------------------
+
+class {{NAME}}Command(Fusion360CommandBase):
+    def __init__(self, cmd_def, debug):
+        super().__init__(cmd_def, debug)
+        self._preview_ok = False
+        self._edit_sketches = []
+        # Values of the last run as loaded when the dialog opened, so the
+        # Start-from dropdown can restore them after a defaults reset or an
+        # edit prefill.
+        self._settings = dict(DEFAULTS)
+
+    # -- Start-from dropdown helpers
+
+    def _edit_sketch_from_inputs(self, inputs):
+        dropdown = inputs.itemById('edit_target')
+        if not dropdown:
+            return None
+        item = dropdown.selectedItem
+        if not item or item.index < len(NEW_LAYOUT_LABELS):
+            return None
+        index = item.index - len(NEW_LAYOUT_LABELS)
+        if index >= len(self._edit_sketches):
+            return None
+        sketch = self._edit_sketches[index]
+        return sketch if sketch and sketch.isValid else None
+
+    def _new_layout_settings(self, inputs):
+        dropdown = inputs.itemById('edit_target')
+        item = dropdown.selectedItem if dropdown else None
+        if item and item.name == CREATE_DEFAULT_LABEL:
+            return DEFAULTS
+        return self._settings
+
+    def _apply_settings(self, inputs, settings):
+        """Refill the whole dialog from a settings dict (defaults or last
+        used). Programmatic changes do not re-enter on_input_changed, so the
+        visibility rules are re-applied explicitly at the end."""
+        for key, input_id in EXPRESSION_INPUTS:
+            command_input = inputs.itemById(input_id)
+            if not command_input:
+                continue
+            # A stored expression can be invalid in this document (e.g. it
+            # referenced a user parameter of another design); fall back to
+            # the default rather than leaving the field red.
+            for expression in (settings.get(key), DEFAULTS[key]):
+                if not isinstance(expression, str):
+                    continue
+                try:
+                    command_input.expression = expression
+                    if command_input.isValidExpression:
+                        break
+                except Exception:
+                    pass
+        for key, input_id, low, high in SPINNER_INPUTS:
+            spinner = inputs.itemById(input_id)
+            stored = settings.get(key, DEFAULTS[key])
+            if spinner and isinstance(stored, int) and low <= stored <= high:
+                try:
+                    spinner.value = stored
+                except Exception:
+                    pass
+        for key, input_id in CHECKBOX_INPUTS:
+            checkbox = inputs.itemById(input_id)
+            if checkbox:
+                checkbox.value = bool(settings.get(key, DEFAULTS[key]))
+        for key, input_id in DROPDOWN_INPUTS:
+            _select_dropdown_item(inputs, input_id, settings.get(key, DEFAULTS[key]))
+        for group_id, key in GROUP_EXPANDERS:
+            group = inputs.itemById(group_id)
+            if group:
+                try:
+                    group.isExpanded = bool(settings.get(key))
+                except Exception:
+                    pass
+        self._apply_visibility(inputs)
+
+    def _prefill_from_sketch(self, inputs, sketch):
+        """Load the stored parameters of an existing layout into the dialog.
+        Metadata holds internal values (cm), so .value is set, not
+        .expression."""
+        metadata = _sketch_metadata(sketch)
+
+        def set_value(input_id, key, allow_zero=False):
+            value_input = inputs.itemById(input_id)
+            stored = metadata.get(key)
+            if value_input and isinstance(stored, (int, float)) and (
+                    stored > 0 or (allow_zero and stored >= 0)):
+                try:
+                    value_input.value = float(stored)
+                except Exception:
+                    pass
+
+        def set_spinner(input_id, key, low, high):
+            spinner = inputs.itemById(input_id)
+            stored = metadata.get(key)
+            if spinner and isinstance(stored, int) and low <= stored <= high:
+                spinner.value = stored
+
+        set_value('length', 'length_cm')
+        set_value('width', 'width_cm')
+        set_value('thickness', 'thickness_cm')
+        cut_holes = bool(metadata.get('cut_holes'))
+        checkbox = inputs.itemById('cut_holes')
+        if checkbox:
+            checkbox.value = cut_holes
+        if cut_holes:
+            _select_dropdown_item(inputs, 'hole_style',
+                                  'Blind' if metadata.get('hole_style') == 'blind'
+                                  else 'Through')
+            set_value('hole_diameter', 'hole_diameter_cm')
+            set_value('hole_depth', 'hole_depth_cm')
+            set_spinner('holes_x', 'holes_x', 1, 20)
+            set_spinner('holes_y', 'holes_y', 1, 20)
+            set_value('edge_margin', 'edge_margin_cm', allow_zero=True)
+        self._apply_visibility(inputs)
+
+    # -- visibility rules (one function, re-applied after every change)
+
+    @staticmethod
+    def _apply_visibility(inputs):
+        checkbox = inputs.itemById('cut_holes')
+        holes_on = bool(checkbox.value) if checkbox else False
+        dropdown = inputs.itemById('hole_style')
+        blind = bool(dropdown and dropdown.selectedItem
+                     and dropdown.selectedItem.name == 'Blind')
+        for input_id, visible in (
+            ('hole_style', holes_on),
+            ('hole_diameter', holes_on),
+            ('hole_depth', holes_on and blind),
+            ('holes_x', holes_on),
+            ('holes_y', holes_on),
+            ('edge_margin', holes_on),
+        ):
+            command_input = inputs.itemById(input_id)
+            if command_input:
+                command_input.isVisible = visible
+
+    # -- command events
+
+    def on_create(self, command, inputs):
+        self._preview_ok = False
+        self._edit_sketches = []
+
+        app = adsk.core.Application.get()
+        ui = app.userInterface
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        if not design:
+            ui.messageBox('Open a design in the Design workspace first.')
+            return
+
+        try:
+            command.setDialogInitialSize(380, 420)
+        except Exception:
+            pass
+
+        settings = load_settings()
+        self._settings = settings
+        units = design.unitsManager.defaultLengthUnits
+
+        self._edit_sketches = _find_layout_sketches(design)
+        edit_dropdown = inputs.addDropDownCommandInput(
+            'edit_target', 'Start from',
+            adsk.core.DropDownStyles.TextListDropDownStyle)
+        for index, label in enumerate(NEW_LAYOUT_LABELS):
+            edit_dropdown.listItems.add(label, index == 0, '')
+        for sketch in self._edit_sketches:
+            edit_dropdown.listItems.add(sketch.name, False, '')
+        edit_dropdown.tooltip = (
+            'Which values this dialog starts with. "Last used values" '
+            'repeats your previous run; "Default values" resets every field. '
+            'Picking an existing layout of this document loads its '
+            'parameters back and rebuilds it in place on OK.')
+
+        def value_input(container, input_id, label, expr_key, unit_type=units):
+            # A stored expression can be invalid in this document; fall back
+            # to the default instead of aborting the whole dialog.
+            for expression in (settings[expr_key], DEFAULTS[expr_key]):
+                try:
+                    container.addValueInput(
+                        input_id, label, unit_type,
+                        adsk.core.ValueInput.createByString(expression))
+                    return
+                except Exception:
+                    if inputs.itemById(input_id):
+                        return
+
+        value_input(inputs, 'length', 'Length', 'length_expr')
+        value_input(inputs, 'width', 'Width', 'width_expr')
+        value_input(inputs, 'thickness', 'Thickness', 'thickness_expr')
+
+        holes_group = inputs.addGroupCommandInput('grp_holes', 'Holes')
+        holes_group.isExpanded = bool(settings['cut_holes'])
+        hg = holes_group.children
+        hg.addBoolValueInput('cut_holes', 'Cut holes', True, '',
+                             bool(settings['cut_holes']))
+        style_dropdown = hg.addDropDownCommandInput(
+            'hole_style', 'Hole style',
+            adsk.core.DropDownStyles.TextListDropDownStyle)
+        for style in HOLE_STYLES:
+            style_dropdown.listItems.add(style, style == settings['hole_style'], '')
+        value_input(hg, 'hole_diameter', 'Hole diameter', 'hole_diameter_expr')
+        value_input(hg, 'hole_depth', 'Hole depth', 'hole_depth_expr')
+        hg.addIntegerSpinnerCommandInput(
+            'holes_x', 'Holes along length', 1, 20, 1, int(settings['holes_x']))
+        hg.addIntegerSpinnerCommandInput(
+            'holes_y', 'Holes across width', 1, 20, 1, int(settings['holes_y']))
+        value_input(hg, 'edge_margin', 'Edge margin', 'edge_margin_expr')
+        margin_input = inputs.itemById('edge_margin')
+        if margin_input:
+            margin_input.tooltip = ('Distance from the part edges to the '
+                                    'outer hole centers. 0 is allowed.')
+        self._apply_visibility(inputs)
+
+        # The info box is the LAST input: on_destroy uses its presence to
+        # tell a fully built dialog from one that bailed out early.
+        inputs.addTextBoxCommandInput(
+            'info_box', 'Info',
+            'Set the parameters — OK creates the part as a new component.',
+            6, True)
+
+    def on_input_changed(self, command_, command_inputs, changed_input, input_values):
+        if changed_input.id == 'info_box':
+            return
+        if changed_input.id == 'edit_target':
+            sketch = self._edit_sketch_from_inputs(command_inputs)
+            if sketch:
+                self._prefill_from_sketch(command_inputs, sketch)
+            else:
+                self._apply_settings(command_inputs,
+                                     self._new_layout_settings(command_inputs))
+        if changed_input.id in ('cut_holes', 'hole_style'):
+            self._apply_visibility(command_inputs)
+
+        info = command_inputs.itemById('info_box')
+        if info:
+            _, message, _ = validate_and_compute(
+                command_inputs, self._edit_sketch_from_inputs(command_inputs))
+            if info.text != message:   # avoid needless input-changed churn
+                info.text = message
+
+    def on_preview(self, command, inputs, args, input_values):
+        self._preview_ok = False
+        ok, message, params = validate_and_compute(
+            inputs, self._edit_sketch_from_inputs(inputs))
+        if not ok:
+            return
+        try:
+            build(params)
+            args.isValidResult = True   # OK keeps this result; execute is skipped
+            self._preview_ok = True
+        except BuildError as error:
+            _set_info(inputs, str(error))
+        except Exception:
+            # Never let an unexpected error escape to the base handler — it
+            # would pop a message box on every keystroke. Report it in the
+            # info box instead.
+            _set_info(inputs, 'Preview failed: {}'.format(
+                traceback.format_exc().splitlines()[-1]))
+
+    def on_execute(self, command, inputs, args, input_values):
+        # When the preview succeeded Fusion keeps it as the result and this
+        # event is skipped; this is only the fallback path.
+        if self._preview_ok:
+            return
+        if inputs.count == 0:
+            return  # on_create bailed out (no active design)
+        app = adsk.core.Application.get()
+        ui = app.userInterface
+        ok, message, params = validate_and_compute(
+            inputs, self._edit_sketch_from_inputs(inputs))
+        if not ok:
+            ui.messageBox('Cannot build:\n\n{}'.format(message))
+            return
+        try:
+            build(params)
+        except BuildError as error:
+            ui.messageBox('Cannot build:\n\n{}'.format(error))
+        except Exception:
+            ui.messageBox('{{COMMAND_NAME}} failed:\n{}'.format(traceback.format_exc()))
+
+    def on_destroy(self, command, inputs, reason, input_values):
+        if reason != adsk.core.CommandTerminationReason.CompletedTerminationReason:
+            return
+        if not inputs.itemById('info_box'):
+            return  # the dialog was never fully built — do not overwrite settings
+        # Reload rather than reuse self._settings, so keys the dialog does
+        # not own (buttons_promoted) keep their stored value.
+        settings = load_settings()
+        for key, input_id in EXPRESSION_INPUTS:
+            value_input = inputs.itemById(input_id)
+            if value_input:
+                settings[key] = value_input.expression   # as typed, unit included
+        for key, input_id, _low, _high in SPINNER_INPUTS:
+            spinner = inputs.itemById(input_id)
+            if spinner:
+                settings[key] = int(spinner.value)
+        for key, input_id in CHECKBOX_INPUTS:
+            checkbox = inputs.itemById(input_id)
+            if checkbox:
+                settings[key] = bool(checkbox.value)
+        for key, input_id in DROPDOWN_INPUTS:
+            dropdown = inputs.itemById(input_id)
+            if dropdown and dropdown.selectedItem:
+                settings[key] = dropdown.selectedItem.name
+        save_settings(settings)
+
+
+def _select_dropdown_item(inputs, input_id, name):
+    dropdown = inputs.itemById(input_id)
+    if not dropdown:
+        return
+    # Only select the target item — clearing the selection first would leave
+    # the dropdown transiently empty, and the framework's get_inputs reads
+    # selectedItem.name on the next event.
+    for i in range(dropdown.listItems.count):
+        item = dropdown.listItems.item(i)
+        if item.name == name:
+            item.isSelected = True
+            break
+
+
+def _set_info(inputs, message):
+    info = inputs.itemById('info_box')
+    if info and info.text != message:
+        info.text = message

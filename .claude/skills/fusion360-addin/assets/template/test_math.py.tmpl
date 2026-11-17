@@ -1,0 +1,59 @@
+import math
+import os
+import sys
+
+# The math module lives inside the add-in folder (next to the adsk code) but
+# imports nothing from adsk, so it can be tested with plain pytest.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '{{NAME}}'))
+
+import {{MATH_MODULE}} as m  # noqa: E402
+
+
+def test_outline_is_counter_clockwise_rectangle():
+    corners = m.outline_corners(10.0, 6.0)
+    assert corners == [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
+
+
+def test_outline_rejects_degenerate_sizes():
+    for length, width in ((0.0, 1.0), (1.0, -2.0)):
+        try:
+            m.outline_corners(length, width)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('degenerate outline must raise')
+
+
+def test_single_hole_is_centered():
+    (center,) = m.hole_centers(10.0, 6.0, 1, 1, 1.0)
+    assert math.isclose(center[0], 5.0) and math.isclose(center[1], 3.0)
+
+
+def test_grid_spans_between_margins():
+    centers = m.hole_centers(10.0, 6.0, 4, 2, 1.0)
+    assert len(centers) == 8
+    xs = sorted({x for x, _ in centers})
+    ys = sorted({y for _, y in centers})
+    assert math.isclose(xs[0], 1.0) and math.isclose(xs[-1], 9.0)
+    assert math.isclose(ys[0], 1.0) and math.isclose(ys[-1], 5.0)
+    # Even spacing along x.
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    assert all(math.isclose(g, gaps[0]) for g in gaps)
+
+
+def test_margin_larger_than_part_raises():
+    try:
+        m.hole_centers(2.0, 2.0, 2, 2, 1.5)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('oversized margin must raise')
+
+
+def test_holes_fit_detects_touching_holes():
+    # Four 2.0-wide holes across 10 with 1.5 margins: centers 7/3 apart > 2.0.
+    assert m.holes_fit(10.0, 6.0, 4, 2, 1.5, 2.0)
+    # Make them wider than the pitch and they overlap.
+    assert not m.holes_fit(10.0, 6.0, 4, 2, 1.5, 2.5)
+    # A hole wider than twice the margin breaks out of the edge.
+    assert not m.holes_fit(10.0, 6.0, 1, 1, 1.0, 2.5)

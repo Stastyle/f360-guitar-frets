@@ -1,0 +1,58 @@
+# Developer notes — API assumptions and pre-flight checks
+
+Fusion cannot run in CI or in a cloud session, so the parts of this add-in
+that depend on Fusion API behavior are listed here with the snippet that
+verifies them. Re-run them in **Utilities → Text Commands** (switch the
+input mode from `Txt` to `Py`) when a new Fusion release misbehaves.
+
+## 1. Canonical frame
+
+Everything is built in a new component created under the active component:
+the part origin at the component origin, length along +X, width along +Y,
+the top face on the XY plane and the body hanging below it (−Z). Sketches
+are native to that component, so `modelToSketchSpace` works in component
+space and no occurrence/proxy mapping is needed.
+
+## 2. Extrude direction is probed, not assumed
+
+`_extrude_body` extrudes the outline by −thickness first and checks the
+body's bounding box (`maxPoint.z <= 1e-4`, i.e. the body hangs below the
+sketch plane); a body that comes out above the plane is deleted and redone
+with the opposite sign. Cuts into the body try −depth first, then +depth.
+
+## 3. `isValidResult` keeps the preview and skips execute
+
+`on_preview` sets `args.isValidResult = True` after a successful build, so
+Fusion reuses the preview as the final result and does not fire execute.
+`on_execute` keeps a `_preview_ok` guard as a fallback either way.
+
+## 4. Metadata and edit mode
+
+Layout parameters and the entity tokens of every created object are stored
+as JSON in an attribute on the outline sketch (`constants.ATTRIBUTE_GROUP`
+/ `ATTRIBUTE_NAME`, version `constants.METADATA_VERSION`). Rebuilding keeps
+that sketch object alive (its curves are replaced in place) and deletes the
+other tracked objects feature-first (`_delete_tracked`), then recreates them
+in the same component.
+
+## 5. Settings
+
+`settings.json` next to the add-in holds the last-used dialog values, as the
+expressions the user typed. The `*_INPUTS` tables at the top of the command
+module are the single settings-key ↔ input-id mapping; a new persisted input
+is added to a table *and* to `on_create`. Only `on_destroy` writes the file,
+and only when the dialog completed (OK) and was fully built.
+
+## Pre-flight: a sketch on an offset plane maps a known point to z ≈ 0
+
+```python
+import adsk.core, adsk.fusion
+app = adsk.core.Application.get()
+d = adsk.fusion.Design.cast(app.activeProduct)
+root = d.rootComponent
+pi = root.constructionPlanes.createInput()
+pi.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByReal(-0.6))
+plane = root.constructionPlanes.add(pi)
+sk = root.sketches.add(plane)
+print(sk.modelToSketchSpace(adsk.core.Point3D.create(0, 0, -0.6)).z)  # ~0 if the sign is as assumed
+```
